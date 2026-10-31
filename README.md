@@ -1,4 +1,4 @@
-# Project TBD
+# Beyond Outliers
 
 ## Environment Setup
 ```
