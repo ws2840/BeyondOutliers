@@ -15,7 +15,7 @@ format:
 
 We will build and backtest an end-to-end US equity portfolio, covering market data, risk and alpha models, optimization, and accounting.
 
-- Instrument Universe: US 3000
+- Instrument Universe: SP500
 - Market Data: Yahoo finance Security Master data and Databento intraday data
 - Risk Model Construction
 - Alpha Model Construction: 2-6 alpha models with a forecast horizon of 1 day
@@ -25,7 +25,7 @@ We will build and backtest an end-to-end US equity portfolio, covering market da
 
 ## Data Requirements
 
-- DataBento: 1min bar data
+- DataBento: 1min/5min/30min bar data
 - Yahoo Finance: supplementary security master data and cross-checks
 - Other features: per alpha model request
 
