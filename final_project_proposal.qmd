@@ -15,22 +15,23 @@ format:
 
 We will build and backtest an end-to-end US equity portfolio, covering market data, risk and alpha models, optimization, and accounting.
 
-- Instrument Universe: SP500
-- Market Data: Yahoo finance Security Master data and Databento intraday data
+- Instrument Universe: S&P 500
+- Market Data: Yahoo finance/WRDS Security Master data and Databento intraday data
 - Risk Model Construction
-- Alpha Model Construction: 2-6 alpha models with a forecast horizon of 1 day
-- Portfolio Construction: trading 9:30 - 4pm EST, aiming to trade every 30 minutes
+- Alpha Model Construction: 2-6 alpha models with a 1-day forecast horizon, evaluated with forecast analytics (IC, t-stats, tail statistics)
+- Spread Cost Model: estimate the bid-ask spread cost of each trade
+- Portfolio Construction: trading 9:45 am - 3:45 pm EST, aiming to trade every 30 minutes
 - Accountant: PNL/Sharpe and position
-- Moonshot Goals: Add market impact and transaction cost models in optimization
 
 ## Data Requirements
 
-- DataBento: 1min/5min/30min bar data
+- DataBento: 1-min, 5-min, and 30-min bar data
 - Yahoo Finance: supplementary security master data and cross-checks
+- WRDS: factor model data
 - Other features: per alpha model request
 
 ## Team Members
 
 Fred Chen(hc3728), Xinye Xie(xx2494), Qingyang Wang(qw2468), Jiao Xu(jx2687), Weikun Zhang(wz2559), Wen Sheng(ws2840)
 
-![Project pipeline, from market data and alpha forecasts to positions and performance.](figures/pipeline_diagram.png){width=75%}
+![Project pipeline, from market data and alpha forecasts to positions and performance.](figures/pipeline_diagram.png){width=55%}
