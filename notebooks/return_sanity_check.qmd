@@ -1,0 +1,261 @@
+---
+title: "Return Sanity Check"
+author: "Wen Sheng (ws2840)"
+date: today
+format:
+  pdf:
+    documentclass: article
+    fontsize: 11pt
+    geometry: margin=1in
+    toc: false
+    number-sections: false
+    include-in-header:
+      text: \usepackage{needspace}
+execute:
+  echo: false        # do not print code into the PDF
+  warning: false
+  message: false
+  cache: true        # re-render fast; delete _cache/ to force a rerun
+jupyter: python3
+---
+
+```{python}
+import sys
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+from matplotlib.ticker import NullFormatter, ScalarFormatter
+import pandas as pd
+from IPython.display import Markdown
+
+ROOT = Path.cwd().parent
+sys.path.insert(0, str(ROOT / "Python"))
+from market_data.universe import get_universe
+
+plt.rcParams.update({"figure.figsize": (6.5, 2.8), "axes.grid": True, "grid.color": "0.9",
+                     "axes.spines.top": False, "axes.spines.right": False, "lines.linewidth": 1})
+
+returns = pd.read_parquet(ROOT / "data" / "returns" / "1h_bar.parquet")
+returns["date"] = returns.index.tz_localize(None).normalize()
+returns["hour"] = returns.index.hour
+
+
+def table(df: pd.DataFrame, digits: int = 4) -> Markdown:
+    return Markdown(df.round(digits).to_markdown())
+```
+
+Data: `data/returns/1h_bar.parquet`, hourly simple returns of the adjusted close
+($r_t = \frac{\text{close}_t \cdot \text{adjust\_factor}_t}{\text{close}_{t-1} \cdot \text{adjust\_factor}_{t-1}} - 1$),
+for each date's point-in-time S&P 500 members. Bars are labeled by bar end (US/Eastern), 10:00 to 16:00;
+the 10:00 return includes the overnight move.
+
+## 1. File Integrity and Coverage
+
+```{python}
+keys = returns.reset_index()[["ts", "ticker"]]
+bars_per_day = returns.groupby(["date", "ticker"]).size()
+summary = pd.Series({
+    "rows": f"{len(returns):,}",
+    "tickers": returns["ticker"].nunique(),
+    "trading days": returns["date"].nunique(),
+    "first bar": returns.index.min(),
+    "last bar": returns.index.max(),
+    "NaN returns": int(returns["ret"].isna().sum()),
+    "duplicate (ts, ticker)": int(keys.duplicated().sum()),
+    "sorted by ts": returns.index.is_monotonic_increasing,
+    "hours present": ", ".join(f"{h}:00" for h in sorted(returns["hour"].unique())),
+    "ticker-days with 7 bars": f"{(bars_per_day == 7).mean():.2%}",
+}, name="value")
+table(summary.to_frame())
+```
+
+Ticker-days with fewer than 7 bars are expected on half-days (e.g. the day after Thanksgiving)
+and for hours with no trade on Nasdaq (XNAS.ITCH is a single venue).
+
+```{python}
+#| fig-cap: "Top: point-in-time S&P 500 members vs. tickers with at least one return, per day. Bottom: members without any return that day."
+#| fig-height: 3.8
+BLUE, GRAY, ORANGE, INK = "#0072B2", "#B0B0B0", "#D55E00", "#333333"  # Okabe-Ito (colorblind-safe) + neutrals
+dates = returns["date"].unique()
+universe_size = pd.Series({d: len(get_universe(d)) for d in dates})
+with_returns = returns.groupby("date")["ticker"].nunique()
+missing = universe_size - with_returns
+
+fig, (top, bottom) = plt.subplots(2, 1, sharex=True, figsize=(6.5, 3.8), gridspec_kw={"height_ratios": [3, 1], "hspace": 0.12})
+top.plot(universe_size.index, universe_size, color=GRAY, linewidth=3, solid_capstyle="round", label="universe members")
+top.plot(with_returns.index, with_returns, color=BLUE, linewidth=1, label="tickers with returns")
+top.set_ylim(universe_size.min() - 5, universe_size.max() + 3)
+top.set_ylabel("tickers", color=INK)
+top.legend(frameon=False, loc="lower left", fontsize=8, ncol=2)
+
+bottom.vlines(missing.index, 0, missing, color=ORANGE, linewidth=1)
+bottom.set_ylim(0, max(missing.max(), 1) + 0.5)
+bottom.set_yticks(range(0, int(missing.max()) + 1))
+bottom.set_ylabel("missing", color=INK)
+bottom.text(0.99, 0.92, f"{(missing > 0).sum()} of {len(missing):,} days have a member without returns",
+            transform=bottom.transAxes, ha="right", va="top", fontsize=8, color=INK)
+for ax in (top, bottom):
+    ax.grid(axis="x", visible=False)
+    ax.tick_params(labelsize=8, colors=INK)
+plt.show()
+```
+
+## 2. Return Distribution and Largest Moves
+
+```{python}
+#| fig-cap: "Distribution of hourly returns (log-scale count) vs. a normal with the same standard deviation. Dotted lines: 0.1% and 99.9% quantiles; the edge bars collect all returns beyond ±15%."
+#| fig-height: 3.2
+import numpy as np
+
+r = returns["ret"] * 100
+bins = np.linspace(-15, 15, 241)
+counts, edges = np.histogram(r.clip(-15, 15), bins=bins)
+centers = (edges[:-1] + edges[1:]) / 2
+normal = len(r) * (edges[1] - edges[0]) * np.exp(-0.5 * (centers / r.std()) ** 2) / (r.std() * np.sqrt(2 * np.pi))
+
+fig, ax = plt.subplots(figsize=(6.5, 3.2))
+ax.bar(centers, counts, width=edges[1] - edges[0], color=BLUE, alpha=0.85, label="hourly returns")
+ax.plot(centers, normal, color=INK, linewidth=1, linestyle="--", label=f"normal (std {r.std():.2f}%)")
+for p in (0.001, 0.999):
+    x = r.quantile(p)
+    ax.axvline(x, color=GRAY, linewidth=1, linestyle=":")
+    ax.text(x, counts.max() * 2, f"{p:.1%}: {x:+.1f}%", ha="center", fontsize=8, color=INK)
+ax.set_yscale("log")
+ax.set_ylim(0.8, counts.max() * 6)
+ax.set_xlim(-15, 15)
+ax.set_xlabel("hourly return (%), clipped to ±15%", color=INK)
+ax.set_ylabel("count", color=INK)
+ax.grid(axis="x", visible=False)
+ax.set_axisbelow(True)
+ax.tick_params(labelsize=8, colors=INK)
+ax.legend(frameon=False, fontsize=8, loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2)
+plt.show()
+```
+
+```{python}
+#| fig-cap: "Standard deviation of hourly returns by bar (10:00 includes the overnight gap)."
+by_hour = returns.groupby("hour")["ret"].std()
+fig, ax = plt.subplots()
+ax.bar([f"{h}:00" for h in by_hour.index], by_hour * 1e4, width=0.6, color="tab:blue")
+ax.set_ylabel("std (bp)")
+plt.show()
+```
+
+Largest absolute hourly returns (candidates for outlier review):
+
+```{python}
+top = returns.reset_index().assign(abs_ret=lambda d: d["ret"].abs()).nlargest(15, "abs_ret")
+table(top[["ts", "ticker", "ret"]].assign(ts=lambda d: d["ts"].dt.strftime("%Y-%m-%d %H:%M")).set_index("ts"))
+```
+
+## 3. Split Adjustment
+
+Returns on known split days should look like ordinary returns (no $-75\%$ or $-90\%$ jumps).
+
+```{python}
+splits = [("AAPL", "2020-08-31", "4:1"), ("NVDA", "2021-07-20", "4:1"), ("AMZN", "2022-06-06", "20:1"),
+          ("GOOGL", "2022-07-18", "20:1"), ("TSLA", "2022-08-25", "3:1"), ("WMT", "2024-02-26", "3:1"),
+          ("NVDA", "2024-06-10", "10:1"), ("CMG", "2024-06-26", "50:1"), ("AVGO", "2024-07-15", "10:1")]
+rows = []
+for ticker, day, ratio in splits:
+    r = returns[(returns["ticker"] == ticker) & (returns["date"] == pd.Timestamp(day))]
+    rows.append({"ticker": ticker, "split day": day, "ratio": ratio,
+                 "10:00 return": r.loc[r["hour"] == 10, "ret"].iloc[0], "max |hourly return|": r["ret"].abs().max()})
+table(pd.DataFrame(rows).set_index("ticker"))
+```
+
+Tickers checked in the rest of the report: splits (AAPL, NVDA, AMZN, TSLA), dividends (XOM),
+a share class (BRK.B), spin-offs (GE), and a stock delisted after a merger (IPG).
+
+```{python}
+#| fig-cap: "Growth of $1 from compounded hourly returns (log scale). Split days show no jumps."
+#| fig-height: 7
+TICKERS = ["AAPL", "NVDA", "AMZN", "TSLA", "XOM", "BRK.B", "GE", "IPG"]
+fig, axes = plt.subplots(4, 2, figsize=(6.5, 7), sharex=True)
+for ax, ticker in zip(axes.flat, TICKERS):
+    r = returns.loc[returns["ticker"] == ticker, "ret"]
+    ax.plot(r.index, (1 + r).cumprod(), color="tab:blue")
+    ax.set_yscale("log")
+    ax.yaxis.set_major_formatter(ScalarFormatter())
+    ax.yaxis.set_minor_formatter(NullFormatter())
+    ax.set_title(ticker, fontsize=9, loc="left")
+    ax.tick_params(labelsize=7)
+fig.supylabel("growth of $1", fontsize=9)
+fig.tight_layout()
+plt.show()
+```
+
+## 4. Reproducibility from Raw Bars
+
+Recompute each ticker's returns directly from the raw bar cache (`data/XNAS.ITCH/<date>/all.parquet`)
+without the adapter, and compare with the file.
+
+```{python}
+raw = pd.concat(pd.read_parquet(f).query("ticker in @TICKERS")
+                for f in sorted((ROOT / "data" / "XNAS.ITCH").glob("20*/all.parquet")))
+rows = []
+for ticker in TICKERS:
+    px = raw.loc[raw["ticker"] == ticker, "close"] * raw.loc[raw["ticker"] == ticker, "adjust_factor"]
+    gap = px.index.to_series().diff() > pd.Timedelta(days=5)  # same rule as return.py: no return across a membership gap
+    recomputed = (px / px.shift(1) - 1).where(~gap).dropna()
+    ours = returns.loc[returns["ticker"] == ticker, "ret"]
+    rows.append({"ticker": ticker, "returns in file": len(ours), "recomputed": len(recomputed),
+                 "same timestamps": ours.index.equals(recomputed.index),
+                 "max |difference|": f"{(ours - recomputed).abs().max():.1e}"})
+table(pd.DataFrame(rows).set_index("ticker"))
+```
+
+## 5. Validation Against CRSP Daily Returns
+
+Compound each day's hourly returns and compare with CRSP's daily total return (`dlyret`, includes dividends),
+matching each ticker to CRSP by trading symbol on each date. CRSP ends 2026-06-30.
+Differences come from the close: our 16:00 bar ends before Nasdaq's closing cross, while CRSP uses the official close.
+
+```{python}
+#| output: false
+import wrds
+
+db = wrds.Connection(wrds_username="ws2840")  # prints "Loading library list..."; hidden by output: false
+crsp = db.raw_sql("""
+    select s.tradingsymbol, d.dlycaldt, d.dlyret, d.dlyorddivamt, d.dlyfacprc
+    from crsp_q_stock.dsf_v2 d
+    join crsp_q_stock.stksecurityinfohist s
+      on d.permno = s.permno and d.dlycaldt between s.secinfostartdt and s.secinfoenddt
+    where s.tradingsymbol in %(symbols)s and d.dlycaldt > '2018-05-01'
+""", params={"symbols": tuple(t.replace(".", "") for t in TICKERS)}, date_cols=["dlycaldt"])
+db.close()
+```
+
+```{python}
+compared, rows = {}, []
+for ticker in TICKERS:
+    ours = returns.loc[returns["ticker"] == ticker, "ret"]
+    daily = (1 + ours).groupby(ours.index.tz_localize(None).normalize()).prod() - 1
+    c = crsp[crsp["tradingsymbol"] == ticker.replace(".", "")].set_index("dlycaldt")
+    both = pd.concat([daily.rename("ours"), c], axis=1).dropna(subset=["ours", "dlyret"])
+    diff = (both["ours"] - both["dlyret"]).abs() * 1e4
+    events = (both["dlyorddivamt"] > 0) | (both["dlyfacprc"] != 1)
+    compared[ticker] = both
+    rows.append({"ticker": ticker, "days": len(both), "corr": round(both["ours"].corr(both["dlyret"]), 4),
+                 "median bp": round(diff.median(), 1), "95th bp": round(diff.quantile(0.95), 1),
+                 "max bp": round(diff.max(), 1), "div/split days": int(events.sum()),
+                 "max bp on those": round(diff[events].max(), 1) if events.any() else None})  # BRK.B: none
+table(pd.DataFrame(rows).set_index("ticker"))
+```
+
+```{python}
+#| fig-cap: "Daily return: compounded hourly returns (y) vs. CRSP (x), in %."
+#| fig-height: 7
+fig, axes = plt.subplots(4, 2, figsize=(6.5, 7))
+for ax, ticker in zip(axes.flat, TICKERS):
+    both = compared[ticker] * 100
+    ax.scatter(both["dlyret"], both["ours"], s=3, color="tab:blue", alpha=0.5)
+    lim = [both[["ours", "dlyret"]].min().min(), both[["ours", "dlyret"]].max().max()]
+    ax.plot(lim, lim, color="0.5", linewidth=0.8)
+    ax.set_title(ticker, fontsize=9, loc="left")
+    ax.tick_params(labelsize=7)
+fig.supxlabel("CRSP daily return (%)", fontsize=9)
+fig.supylabel("ours (%)", fontsize=9)
+fig.tight_layout()
+plt.show()
+```
