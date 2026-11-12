@@ -22,11 +22,10 @@ SCHEMA = "ohlcv-1h"
 BAR_COLUMNS = ["ticker", "open", "high", "low", "close", "volume"]
 FACTOR_COLUMNS = ["adjust_factor", "split_factor"]
 
-
 class DatabentoAdapter:
     """
     - get_data(tickers, for_date) returns a DataFrame containing the requested 1h bar data. (download if not exists)
-    - data are cached at data/dataset_name/for-date/ticker.parquet
+    - data are cached at data/dataset_name/for-date/all.parquet
     - CAX adjust factor (go forward base from start date) in the get_data output (with adjust_factor as a seperate column): split ratio / (1 - dividend / prev_close)
     - use batch download api to speed up downloading
     - start from 2018/05/01 (use XNAS.ITCH)
@@ -47,7 +46,10 @@ class DatabentoAdapter:
     def get_data_range(self, start_date: str | date, end_date: str | date,
                        tickers: str | list[str] | None = None) -> pd.DataFrame:
         universe_membership = self.download(start_date, end_date, tickers)
-        frames = [pd.read_parquet(self._path(d, t)) for d, members in universe_membership.items() for t in members]
+        frames = []
+        for d, members in universe_membership.items():
+            day = pd.read_parquet(self._path(d))
+            frames.append(day[day["ticker"].isin(members)])
         frames = [f for f in frames if not f.empty]
         if not frames:
             return pd.DataFrame(columns=BAR_COLUMNS + FACTOR_COLUMNS)
@@ -67,8 +69,10 @@ class DatabentoAdapter:
         dates = [d.date() for d in pd.bdate_range(max(pd.Timestamp(start_date), pd.Timestamp(START_DATE)), end_date)]
         universe_membership = {d: get_universe(d) if tickers is None else tickers for d in dates}
 
-        missing = {d: [t for t in members if not self._path(d, t).exists()]
-                   for d, members in universe_membership.items()}
+        # attrs["tickers"] of a date's file lists every ticker already requested for that date
+        cached = {d: set(pd.read_parquet(self._path(d), columns=["ticker"]).attrs["tickers"])
+                  if self._path(d).exists() else set() for d in dates}
+        missing = {d: [t for t in members if t not in cached[d]] for d, members in universe_membership.items()}
         missing = {d: members for d, members in missing.items() if members}
         if not missing:
             return universe_membership
@@ -119,7 +123,7 @@ class DatabentoAdapter:
             files = _retry(lambda: self.client.batch.download(job_id=job_id, output_dir=tmp))
             raw = pd.concat([db.DBNStore.from_file(f).to_df() for f in files if f.name.endswith(".dbn.zst")])
 
-        groups = {}
+        bars_by_date = {}
         if not raw.empty:
             bars = raw.rename(columns={"symbol": "ticker"})[BAR_COLUMNS]
             bars.index = (bars.index.tz_convert(TZ) + pd.Timedelta(hours=1)).rename("ts")  # label by bar end
@@ -129,17 +133,24 @@ class DatabentoAdapter:
                 table = factor_table.reindex(bar_dates.unique(), method="ffill")
                 bars[column] = table.to_numpy()[table.index.get_indexer(bar_dates),
                                                 table.columns.get_indexer(bars["ticker"])]
-            groups = dict(list(bars.groupby([bars.index.date, "ticker"])))
+            bars_by_date = dict(list(bars.groupby(bars.index.date)))
 
-        # Pairs with no bars (holidays, not listed) get an empty file so they are not requested again.
-        for d, members in missing.items():
-            for t in members:
-                path = self._path(d, t)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                groups.get((d, t), pd.DataFrame(columns=BAR_COLUMNS + FACTOR_COLUMNS)).to_parquet(path)
+        # One file per date, merged with what is already cached. attrs["tickers"] records every requested
+        # ticker, with or without bars (holidays, not listed), so it is not requested again.
+        for d, tickers in missing.items():
+            path = self._path(d)
+            frames = [pd.read_parquet(path)] if path.exists() else []
+            requested = set(tickers) | set(frames[0].attrs["tickers"] if frames else [])
+            if d in bars_by_date:
+                frames.append(bars_by_date[d][bars_by_date[d]["ticker"].isin(tickers)])
+            frames = [f for f in frames if not f.empty]
+            day = pd.concat(frames).sort_index(kind="stable") if frames else pd.DataFrame(columns=BAR_COLUMNS + FACTOR_COLUMNS)
+            day.attrs["tickers"] = sorted(requested)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            day.to_parquet(path)
 
-    def _path(self, for_date: date, ticker: str) -> Path:
-        return self.cache_dir / for_date.isoformat() / f"{ticker}.parquet"
+    def _path(self, for_date: date) -> Path:
+        return self.cache_dir / for_date.isoformat() / "all.parquet"
 
     def _factor_tables(self, tickers: list[str]) -> dict[str, pd.DataFrame]:
         """Daily forward factors (rows: dates, columns: tickers), products over ex-dates in (START_DATE, date]:
