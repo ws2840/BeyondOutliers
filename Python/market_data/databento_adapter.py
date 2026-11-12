@@ -42,6 +42,19 @@ class DatabentoAdapter:
 
     def get_data_range(self, start_date: str | date, end_date: str | date,
                        tickers: str | list[str] | None = None) -> pd.DataFrame:
+        universe_membership = self.download(start_date, end_date, tickers)
+        frames = [pd.read_parquet(self._path(d, t)) for d, members in universe_membership.items() for t in members]
+        frames = [f for f in frames if not f.empty]
+        if not frames:
+            return pd.DataFrame(columns=BAR_COLUMNS + ["adjust_factor"])
+        return pd.concat(frames).sort_index(kind="stable")
+
+    def download(self, start_date: str | date, end_date: str | date,
+                 tickers: str | list[str] | None = None) -> dict[date, list[str]]:
+        """
+        Cache every missing (date, ticker) in [start_date, end_date]: one batch job per calendar quarter,
+        all submitted up front so Databento processes them in parallel. Returns date -> requested tickers.
+        """
         if isinstance(tickers, str):
             tickers = [tickers]
         dates = [d.date() for d in pd.bdate_range(max(pd.Timestamp(start_date), pd.Timestamp(START_DATE)), end_date)]
@@ -50,25 +63,38 @@ class DatabentoAdapter:
         missing = {d: [t for t in members if not self._path(d, t).exists()]
                    for d, members in universe_membership.items()}
         missing = {d: members for d, members in missing.items() if members}
-        if missing:
-            self._batch_download(missing)
+        if not missing:
+            return universe_membership
 
-        frames = [pd.read_parquet(self._path(d, t)) for d, members in universe_membership.items() for t in members]
-        frames = [f for f in frames if not f.empty]
-        if not frames:
-            return pd.DataFrame(columns=BAR_COLUMNS + ["adjust_factor"])
-        return pd.concat(frames).sort_index(kind="stable")
+        quarters = {}
+        for d, members in missing.items():
+            quarters.setdefault((d.year, (d.month - 1) // 3), {})[d] = members
+        jobs = [(self._submit(quarter), quarter) for quarter in quarters.values()]
+        factor_table = self._factor_table(sorted({t for members in missing.values() for t in members}))
+        for job_id, quarter in jobs:
+            self._save(job_id, quarter, factor_table)
+        return universe_membership
 
-    def _batch_download(self, missing: dict[date, list[str]]) -> None:
+    def _submit(self, missing: dict[date, list[str]]) -> str:
         symbols = sorted({t for members in missing.values() for t in members})
-        job = self.client.batch.submit_job(dataset=self.dataset, schema=SCHEMA, symbols=symbols,
-                                           start=min(missing), end=max(missing) + pd.Timedelta(days=1),
-                                           encoding="dbn", compression="zstd", split_duration="month")
+        while True:
+            try:
+                job = self.client.batch.submit_job(dataset=self.dataset, schema=SCHEMA, symbols=symbols,
+                                                   start=min(missing), end=max(missing) + pd.Timedelta(days=1),
+                                                   encoding="dbn", compression="zstd", split_duration="none")
+                break
+            except db.BentoClientError as e:
+                if e.http_status != 429:  # Databento rate-limits batch submissions; wait and retry
+                    raise
+                time.sleep(15)
         print(f"Batch job {job['id']}: {len(symbols)} tickers, {min(missing)}..{max(missing)}")
-        while not any(j["id"] == job["id"] for j in self.client.batch.list_jobs(states="done")):
+        return job["id"]
+
+    def _save(self, job_id: str, missing: dict[date, list[str]], factor_table: pd.DataFrame) -> None:
+        while not any(j["id"] == job_id for j in self.client.batch.list_jobs(states="done")):
             time.sleep(10)
         with tempfile.TemporaryDirectory() as tmp:
-            files = self.client.batch.download(job_id=job["id"], output_dir=tmp)
+            files = self.client.batch.download(job_id=job_id, output_dir=tmp)
             raw = pd.concat([db.DBNStore.from_file(f).to_df() for f in files if f.name.endswith(".dbn.zst")])
 
         groups = {}
@@ -76,7 +102,10 @@ class DatabentoAdapter:
             bars = raw.rename(columns={"symbol": "ticker"})[BAR_COLUMNS]
             bars.index = (bars.index.tz_convert(TZ) + pd.Timedelta(hours=1)).rename("ts")  # label by bar end
             bars = bars[(bars.index.hour >= 10) & (bars.index.hour <= 16)]
-            bars["adjust_factor"] = self._adjust_factor(bars)
+            bar_dates = bars.index.tz_localize(None).normalize()
+            table = factor_table.reindex(bar_dates.unique(), method="ffill")
+            bars["adjust_factor"] = table.to_numpy()[table.index.get_indexer(bar_dates),
+                                                     table.columns.get_indexer(bars["ticker"])]
             groups = dict(list(bars.groupby([bars.index.date, "ticker"])))
 
         # Pairs with no bars (holidays, not listed) get an empty file so they are not requested again.
@@ -89,9 +118,9 @@ class DatabentoAdapter:
     def _path(self, for_date: date, ticker: str) -> Path:
         return self.cache_dir / for_date.isoformat() / f"{ticker}.parquet"
 
-    def _adjust_factor(self, bars: pd.DataFrame) -> pd.Series:
-        """Product of split ratio / (1 - dividend / prev_close) over ex-dates in (START_DATE, bar date]."""
-        tickers = list(bars["ticker"].unique())
+    def _factor_table(self, tickers: list[str]) -> pd.DataFrame:
+        """Daily adjust_factor (rows: dates, columns: tickers) = product of
+        split ratio / (1 - dividend / prev_close) over ex-dates in (START_DATE, date]."""
         daily = yf.download([t.replace(".", "-") for t in tickers], start=START_DATE - pd.Timedelta(days=14),
                             auto_adjust=False, actions=True, group_by="ticker", progress=False)
         factors = {}
@@ -104,11 +133,7 @@ class DatabentoAdapter:
             multiplier = px["Stock Splits"].replace(0, 1) / (1 - dividend_yield)
             multiplier[multiplier.index <= pd.Timestamp(START_DATE)] = 1.0
             factors[t] = multiplier.cumprod()
-
-        bar_dates = bars.index.tz_localize(None).normalize()
-        table = pd.DataFrame(factors, columns=tickers).ffill().reindex(bar_dates.unique(), method="ffill")
-        values = table.to_numpy()[table.index.get_indexer(bar_dates), table.columns.get_indexer(bars["ticker"])]
-        return pd.Series(values, index=bars.index)
+        return pd.DataFrame(factors, columns=tickers).ffill()
 
 
 def get_data(start_date: str | date, end_date: str | date,
@@ -121,9 +146,15 @@ def main(for_date) -> None:
     tickers = ['AAPL']
     adapter = DatabentoAdapter()
     df = adapter.get_data(tickers, for_date)
-    print(df)
+    print(df.head())
     return df
+
+def full_history_download(start_date: str | date = START_DATE, end_date: str | date | None = None,
+                          dataset: str = "XNAS.ITCH") -> None:
+    """Download hourly bars for each date's S&P 500 members over [start_date, end_date] (default: today)."""
+    DatabentoAdapter(dataset).download(start_date, end_date or date.today())
 
 
 if __name__ == "__main__":
-    main("2018-05-01")
+    # main("2018-05-01")
+    full_history_download(START_DATE, '2026-11-10')
