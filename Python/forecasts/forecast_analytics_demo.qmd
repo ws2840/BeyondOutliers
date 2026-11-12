@@ -1,0 +1,251 @@
+---
+title: "Forecast Analytics — Individual Forecast Diagnostics"
+subtitle: "Raw-return target | Simulated hourly forecasts for the next trading day"
+author: "Quant Research Project"
+format:
+  html:
+    toc: true
+    code-fold: true
+execute:
+  echo: false
+  warning: false
+  message: false
+jupyter: python3
+---
+
+Overview: 
+- (return, forecast) IC
+- T-stats, tail statistics
+- Goal: test individual forecasts without running simulations (pseudo positions/pnl)
+- Goal: raw return build target
+
+Data with predicted return
+Data from market 
+Calculate IC , tstat, tail stat 
+Output =? Pseudo positions/ pnl
+
+
+## 1. Objective and data contract
+
+This is a **forecast diagnostics tool**, not a full trading backtest. Each model submits forecasts created on `forecast_date` for each ticker and hour on the **next trading day** (`target_date`). We initially evaluate against **raw returns**, without a risk-model residualization step.
+
+Inputs are two tables:
+
+- `forecasts.csv`: `forecast_date`, `target_date`, `ticker`, `hour`, `forecast`
+- `raw_returns.csv`: `target_date`, `ticker`, `hour`, `raw_return`
+- Or, if raw returns are not yet built: `hourly_bars.csv`: `target_date`, `ticker`, `hour`, `open`, `close` (the tool derives `close / open - 1`).
+
+`forecast` is a model score (higher = more bullish); it need not be in return units. `raw_return` is the realized return for exactly the predicted hourly bar, **in decimal units** (0.001 = 10 bps). For live data, define this hourly return convention consistently, e.g. `hour_close / hour_open - 1`.
+
+## 2. Configuration and data loading
+
+```{python}
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Change to False after the team provides real CSVs.
+USE_DUMMY_DATA = True
+FORECAST_PATH = Path("data/forecasts.csv")
+RETURN_PATH = Path("data/raw_returns.csv")
+HOURLY_BARS_PATH = Path("data/hourly_bars.csv")
+TARGET_COL = "raw_return"  # Later: "residualized_return" if supplied.
+RANDOM_SEED = 42
+
+if USE_DUMMY_DATA:
+    rng = np.random.default_rng(RANDOM_SEED)
+    n_days, n_tickers, n_hours = 60, 40, 6
+    trading_dates = pd.bdate_range("2026-01-02", periods=n_days + 1)
+    tickers = [f"STK{i:03d}" for i in range(n_tickers)]
+    forecast_records, return_records = [], []
+
+    for forecast_date, target_date in zip(trading_dates[:-1], trading_dates[1:]):
+        for hour in range(1, n_hours + 1):
+            shared_signal = rng.standard_normal(n_tickers)
+            # Jointly simulated forecast and future realized return.
+            model_forecast = 0.0005 * shared_signal + 0.0035 * rng.standard_normal(n_tickers)
+            realized_return = (
+                0.0001 + 0.0020 * shared_signal
+                + 0.0035 * rng.standard_normal(n_tickers)
+                + 0.0008 * rng.standard_normal()
+            )
+            for ticker, pred, ret in zip(tickers, model_forecast, realized_return):
+                forecast_records.append((forecast_date, target_date, ticker, hour, pred))
+                return_records.append((target_date, ticker, hour, ret))
+
+    forecasts = pd.DataFrame(
+        forecast_records,
+        columns=["forecast_date", "target_date", "ticker", "hour", "forecast"],
+    )
+    returns = pd.DataFrame(
+        return_records,
+        columns=["target_date", "ticker", "hour", "raw_return"],
+    )
+else:
+    forecasts = pd.read_csv(FORECAST_PATH)
+    if RETURN_PATH.exists():
+        returns = pd.read_csv(RETURN_PATH)
+    elif TARGET_COL == "raw_return" and HOURLY_BARS_PATH.exists():
+        # If hourly OHLC bars are supplied instead of a ready-made return target:
+        bars = pd.read_csv(HOURLY_BARS_PATH)
+        required_bars = {"target_date", "ticker", "hour", "open", "close"}
+        assert required_bars.issubset(bars.columns), "Missing hourly bar columns"
+        assert (bars["open"] > 0).all(), "Hourly open price must be positive"
+        returns = bars[["target_date", "ticker", "hour"]].copy()
+        returns["raw_return"] = bars["close"] / bars["open"] - 1.0
+    else:
+        raise FileNotFoundError("Provide data/raw_returns.csv or data/hourly_bars.csv")
+
+required_forecasts = {"forecast_date", "target_date", "ticker", "hour", "forecast"}
+required_returns = {"target_date", "ticker", "hour", TARGET_COL}
+assert required_forecasts.issubset(forecasts.columns), "Missing forecast input columns"
+assert required_returns.issubset(returns.columns), "Missing return input columns"
+
+for frame in (forecasts, returns):
+    frame["target_date"] = pd.to_datetime(frame["target_date"]).dt.normalize()
+forecasts["forecast_date"] = pd.to_datetime(forecasts["forecast_date"]).dt.normalize()
+
+keys = ["target_date", "ticker", "hour"]
+assert not forecasts.duplicated(keys).any(), "Duplicate model forecasts for the same target"
+assert not returns.duplicated(keys).any(), "Duplicate realized returns for the same target"
+assert (forecasts["forecast_date"] < forecasts["target_date"]).all(), "Forecasts must precede their targets"
+
+df = forecasts.merge(returns[keys + [TARGET_COL]], on=keys, how="inner", validate="one_to_one")
+assert len(df) == len(forecasts), "Some forecast targets have no matching returns"
+df = df.dropna(subset=["forecast", TARGET_COL]).copy()
+assert np.isfinite(df[["forecast", TARGET_COL]].to_numpy(dtype=float)).all(), "Non-finite values found"
+
+print(f"Rows evaluated: {len(df):,}")
+print(f"Trading days: {df['target_date'].nunique()} | Tickers: {df['ticker'].nunique()} | Hours/day: {df['hour'].nunique()}")
+print(f"Target: {TARGET_COL} | Simulated data: {USE_DUMMY_DATA}")
+print(df[["forecast_date", "target_date", "ticker", "hour", "forecast", TARGET_COL]].head().to_string(index=False))
+```
+
+## 3. Information Coefficient (IC)
+
+We compute **cross-sectional IC within each target day × hour**, comparing forecasts and realized returns across tickers. Pearson IC tests linear association; Rank IC is Spearman rank correlation. Daily IC averages all hourly IC values for that day.
+
+```{python}
+def daily_t_stat(values):
+    """Naive t-statistic of a series of DAILY measurements."""
+    s = pd.Series(values, dtype=float).dropna()
+    if len(s) < 2 or s.std(ddof=1) == 0:
+        return float("nan")
+    return s.mean() / (s.std(ddof=1) / np.sqrt(len(s)))
+
+ic_rows = []
+for (date, hour), group in df.groupby(["target_date", "hour"], sort=True):
+    if len(group) < 3:
+        continue
+    ic_rows.append({
+        "target_date": date,
+        "hour": hour,
+        "n_tickers": len(group),
+        "pearson_ic": group["forecast"].corr(group[TARGET_COL], method="pearson"),
+        "rank_ic": group["forecast"].corr(group[TARGET_COL], method="spearman"),
+    })
+
+ic_hourly = pd.DataFrame(ic_rows)
+assert not ic_hourly.empty, "Need at least three symbols per target day/hour"
+ic_daily = ic_hourly.groupby("target_date")[["pearson_ic", "rank_ic"]].mean()
+
+ic_summary = pd.DataFrame([
+    {"Metric": "Pearson IC", "Mean": ic_daily["pearson_ic"].mean(), "Daily t-stat": daily_t_stat(ic_daily["pearson_ic"])},
+    {"Metric": "Rank IC", "Mean": ic_daily["rank_ic"].mean(), "Daily t-stat": daily_t_stat(ic_daily["rank_ic"])},
+])
+print(ic_summary.round(4).to_string(index=False))
+```
+
+## 4. Forecast buckets and tail statistics
+
+For each date/hour, sort stocks by forecast and create five quintiles (`1` = lowest forecast, `5` = highest). Check whether realized returns rise across buckets, and inspect the 5th/95th percentile of returns in each bucket.
+
+```{python}
+def to_quintiles(s):
+    return pd.qcut(s.rank(method="first"), q=5, labels=False) + 1
+
+df["forecast_bucket"] = df.groupby(["target_date", "hour"])["forecast"].transform(to_quintiles)
+
+bucket_stats = df.groupby("forecast_bucket")[TARGET_COL].agg(
+    count="count",
+    mean_return="mean",
+    positive_rate=lambda x: (x > 0).mean(),
+    p05=lambda x: x.quantile(0.05),
+    p95=lambda x: x.quantile(0.95),
+).reset_index()
+
+bucket_show = bucket_stats.copy()
+for col in ("mean_return", "p05", "p95"):
+    bucket_show[col + "_bps"] = 10_000 * bucket_show.pop(col)
+bucket_show["positive_rate_pct"] = 100 * bucket_show.pop("positive_rate")
+print(bucket_show.round(2).to_string(index=False))
+
+raw_tail = df[TARGET_COL].quantile([0.01, 0.05, 0.5, 0.95, 0.99]) * 10_000
+print("\nUnconditional raw-return percentiles (bps):")
+print(raw_tail.round(2).to_string())
+```
+
+## 5. Pseudo positions and pseudo PnL (diagnostic only)
+
+Within each date/hour, demean forecasts and scale so that the **sum of absolute weights is 1** (approximately 0.5 gross long / 0.5 gross short). Calculate forecast-weighted realized returns. This is an **idealized signal diagnostic**, without execution fills, trading costs, financing, order constraints, or turnover simulation.
+
+```{python}
+def demeaned_unit_gross_weights(s):
+    centered = s - s.mean()
+    gross = centered.abs().sum()
+    return centered / gross if gross > 0 else pd.Series(0.0, index=s.index)
+
+df["pseudo_weight"] = df.groupby(["target_date", "hour"])["forecast"].transform(
+    demeaned_unit_gross_weights
+)
+df["pseudo_pnl_contribution"] = df["pseudo_weight"] * df[TARGET_COL]
+
+pnl_hourly = (
+    df.groupby(["target_date", "hour"], as_index=False)["pseudo_pnl_contribution"]
+    .sum()
+    .rename(columns={"pseudo_pnl_contribution": "pseudo_pnl"})
+)
+pnl_daily = pnl_hourly.groupby("target_date")["pseudo_pnl"].sum().sort_index()
+
+var05 = pnl_daily.quantile(0.05)
+cvar05 = pnl_daily[pnl_daily <= var05].mean()
+
+pnl_summary = pd.DataFrame([{
+    "Daily mean (bps)": pnl_daily.mean() * 10_000,
+    "Daily t-stat": daily_t_stat(pnl_daily),
+    "Positive days (%)": (pnl_daily > 0).mean() * 100,
+    "5% VaR cutoff (bps)": var05 * 10_000,
+    "5% CVaR (bps)": cvar05 * 10_000,
+}])
+print(pnl_summary.round(3).to_string(index=False))
+```
+
+## 6. Diagnostic plots
+
+```{python}
+fig, ax = plt.subplots(figsize=(9, 3.4))
+ax.plot(ic_daily.index, ic_daily["rank_ic"], lw=1.2)
+ax.axhline(0, ls="--", lw=0.8)
+ax.set(title="Daily rank IC (averaged across hours)", ylabel="Rank IC", xlabel="Target date")
+fig.autofmt_xdate()
+plt.show()
+
+fig, ax = plt.subplots(figsize=(9, 3.4))
+ax.plot(pnl_daily.index, pnl_daily.cumsum() * 10_000, lw=1.5)
+ax.axhline(0, ls="--", lw=0.8)
+ax.set(title="Cumulative pseudo PnL (additive bps; NOT a backtest)", ylabel="Sum of daily bps", xlabel="Target date")
+fig.autofmt_xdate()
+plt.show()
+```
+
+## 7. Interpretation and next steps
+
+- **IC / Rank IC:** Is each model's forecast associated with future raw returns in the correct direction?
+- **Daily t-stat:** Does the mean daily IC or pseudo PnL differ from zero under a simple independence assumption? **Not** HAC-adjusted; daily observations can be serially dependent.
+- **Forecast buckets / tails:** Do top-ranked predictions outperform bottom-ranked predictions, and how bad are extreme realized returns?
+- **Pseudo PnL:** A quick, idealized sanity check; **not** an executable strategy or portfolio simulation.
+
+**Limitations:** In the demo, `pd.bdate_range` excludes weekends but **does not exclude market holidays**. Replace with an exchange calendar for production. Hour `1`–`6` is a synthetic six-bin convention, not a precise US market session schedule. In production, define every hourly bar timestamp and how its return is computed, and ensure forecasts are generated before the target day's market data becomes available. Real-data performance must be evaluated out-of-sample.
+
+When the risk model is available, add a new target column (e.g. `residualized_return`) to the returns table and change `TARGET_COL` above; the analytics code remains the same.
