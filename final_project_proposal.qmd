@@ -25,7 +25,7 @@ We will build and backtest an end-to-end US equity portfolio, covering market da
 
 ## Data Requirements
 
-- DataBento: 1h bar data
+- DataBento: 1h bar data from XNAS.ITCH, starting from 2018-05-01 (earliest)
 - Yahoo Finance: supplementary security master data and cross-checks
 - WRDS: factor model data
 - Other features: per alpha model request

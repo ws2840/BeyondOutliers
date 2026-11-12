@@ -1,3 +1,5 @@
+# local bar data
+data/XNAS.ITCH/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
