@@ -27,8 +27,8 @@ We will build and backtest an end-to-end US equity portfolio, covering market da
 
 - DataBento: 1h bar data from XNAS.ITCH, starting from 2018-05-01 (earliest)
 - Yahoo Finance: security master data after 2026-06-30
-- WRDS: security master data (CRSP) before 2026-06-30
-- FactSet: factor model data
+- WRDS CRSP: security master data before 2026-06-30
+- WRDS Global factor model: 153 factors
 - Other features: per alpha model request
 
 ## Team Members
