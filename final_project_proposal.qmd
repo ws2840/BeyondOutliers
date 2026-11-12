@@ -20,12 +20,12 @@ We will build and backtest an end-to-end US equity portfolio, covering market da
 - Risk Model Construction
 - Alpha Model Construction: 2-6 alpha models with a 1-day forecast horizon, evaluated with forecast analytics (IC, t-stats, tail statistics)
 - Spread Cost Model: estimate the bid-ask spread cost of each trade
-- Portfolio Construction: trading 10:00 am - 3:30 pm EST, aiming to trade every 30 minutes
+- Portfolio Construction: trading 10:00 am - 3:00 pm EST, aiming to trade every 1h
 - Accountant: PNL/Sharpe and position
 
 ## Data Requirements
 
-- DataBento: 30-min bar data
+- DataBento: 1h bar data
 - Yahoo Finance: supplementary security master data and cross-checks
 - WRDS: factor model data
 - Other features: per alpha model request
