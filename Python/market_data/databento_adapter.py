@@ -8,6 +8,7 @@ from pathlib import Path
 import databento as db
 import pandas as pd
 import requests
+import wrds
 import yfinance as yf
 
 try:
@@ -21,6 +22,8 @@ TZ = "US/Eastern"
 SCHEMA = "ohlcv-1h"
 BAR_COLUMNS = ["ticker", "open", "high", "low", "close", "volume"]
 FACTOR_COLUMNS = ["adjust_factor", "split_factor"]
+WRDS_USERNAME = "ws2840" # <- change to your user id
+CRSP_LIB = "crsp_q_stock"  # quarterly-updated CRSP (v2 tables)
 
 class DatabentoAdapter:
     """
@@ -130,7 +133,7 @@ class DatabentoAdapter:
             bars = bars[(bars.index.hour >= 10) & (bars.index.hour <= 16)]
             bar_dates = bars.index.tz_localize(None).normalize()
             for column, factor_table in factor_tables.items():
-                table = factor_table.reindex(bar_dates.unique(), method="ffill")
+                table = factor_table.reindex(bar_dates.unique())  # NaN after CRSP's last date
                 bars[column] = table.to_numpy()[table.index.get_indexer(bar_dates),
                                                 table.columns.get_indexer(bars["ticker"])]
             bars_by_date = dict(list(bars.groupby(bars.index.date)))
@@ -153,24 +156,56 @@ class DatabentoAdapter:
         return self.cache_dir / for_date.isoformat() / "all.parquet"
 
     def _factor_tables(self, tickers: list[str]) -> dict[str, pd.DataFrame]:
-        """Daily forward factors (rows: dates, columns: tickers), products over ex-dates in (START_DATE, date]:
-        adjust_factor of split ratio / (1 - dividend / prev_close), split_factor of split ratio."""
-        daily = yf.download([t.replace(".", "-") for t in tickers], start=START_DATE - pd.Timedelta(days=14),
-                            auto_adjust=False, actions=True, group_by="ticker", progress=False)
-        adjust, split = {}, {}
+        """Daily forward factors from CRSP (rows: dates, columns: tickers), products over days in (START_DATE, date]
+        of the ticker's PERMNO: adjust_factor of split ratio / (1 - dividend / prev_close), split_factor of split ratio.
+        Tickers are matched to PERMNOs point in time by CRSP trading symbol (BRK.B -> BRKB).
+        After CRSP's last date, each factor is continued from its CRSP value with yfinance splits and dividends."""
+        symbols = {t.replace(".", ""): t for t in tickers}
+        db = wrds.Connection(wrds_username=WRDS_USERNAME)
+        names = db.raw_sql(f"select permno, tradingsymbol, secinfostartdt, secinfoenddt from {CRSP_LIB}.stksecurityinfohist "
+                           "where tradingsymbol in %(symbols)s and secinfoenddt >= %(start)s",
+                           params={"symbols": tuple(symbols), "start": START_DATE},
+                           date_cols=["secinfostartdt", "secinfoenddt"])
+        daily = db.raw_sql(f"select permno, dlycaldt, dlyfacprc, dlyret, dlyretx from {CRSP_LIB}.dsf_v2 "
+                           "where permno in %(permnos)s and dlycaldt >= %(start)s",
+                           params={"permnos": tuple(names["permno"].unique().tolist()), "start": START_DATE},
+                           date_cols=["dlycaldt"])
+        db.close()
+
+        daily = daily.sort_values(["permno", "dlycaldt"])
+        after_start = daily["dlycaldt"] > pd.Timestamp(START_DATE)
+        split_ratio = daily["dlyfacprc"].fillna(1.0).where(after_start, 1.0)  # e.g. 4.0 on a 4-for-1 split day
+        dividend_yield = (daily["dlyret"] - daily["dlyretx"]).fillna(0.0).where(after_start, 0.0)  # dividend / prev_close
+        daily["split_factor"] = split_ratio.groupby(daily["permno"]).cumprod()
+        daily["adjust_factor"] = (split_ratio / (1 - dividend_yield)).groupby(daily["permno"]).cumprod()
+
+        # label each PERMNO-day with the ticker it traded under that day
+        daily = pd.merge_asof(daily.sort_values("dlycaldt"), names.sort_values("secinfostartdt"),
+                              left_on="dlycaldt", right_on="secinfostartdt", by="permno")
+        daily = daily[daily["dlycaldt"] <= daily["secinfoenddt"]]
+        daily["ticker"] = daily["tradingsymbol"].map(symbols)
+        table = daily.pivot(index="dlycaldt", columns="ticker", values=FACTOR_COLUMNS)
+        crsp = {column: table[column].reindex(columns=tickers) for column in FACTOR_COLUMNS}
+
+        # extend past CRSP's last date with yfinance events, chained on each ticker's last CRSP factor
+        # (base 1 for a ticker not in CRSP on that date, e.g. listed or renamed afterwards)
+        crsp_end = table.index.max()
+        base = {column: crsp[column].loc[crsp_end].fillna(1.0) for column in FACTOR_COLUMNS}
+        prices = yf.download([t.replace(".", "-") for t in tickers], start=crsp_end - pd.Timedelta(days=14),
+                             auto_adjust=False, actions=True, group_by="ticker", progress=False)
+        extension = {column: {} for column in FACTOR_COLUMNS}
         for t in tickers:
             symbol = t.replace(".", "-")  # yfinance uses BRK-B
-            if symbol not in daily or daily[symbol]["Close"].isna().all():  # no yfinance data -> NaN factor
+            if symbol not in prices or prices[symbol]["Close"].isna().all():
                 continue
-            px = daily[symbol].dropna(subset=["Close"])
-            split_ratio = px["Stock Splits"].replace(0, 1)
-            split_ratio[split_ratio.index <= pd.Timestamp(START_DATE)] = 1.0
-            dividend_yield = (px["Dividends"] / px["Close"].shift(1)).fillna(0)
-            dividend_yield[dividend_yield.index <= pd.Timestamp(START_DATE)] = 0.0
-            adjust[t] = (split_ratio / (1 - dividend_yield)).cumprod()
-            split[t] = split_ratio.cumprod()
-        return {"adjust_factor": pd.DataFrame(adjust, columns=tickers).ffill(),
-                "split_factor": pd.DataFrame(split, columns=tickers).ffill()}
+            px = prices[symbol].dropna(subset=["Close"])
+            after = px.index > crsp_end
+            split_ratio = px["Stock Splits"].replace(0, 1).where(after, 1.0)
+            dividend_yield = (px["Dividends"] / px["Close"].shift(1)).fillna(0).where(after, 0.0)
+            extension["split_factor"][t] = base["split_factor"][t] * split_ratio.cumprod()[after]
+            extension["adjust_factor"][t] = base["adjust_factor"][t] * (split_ratio / (1 - dividend_yield)).cumprod()[after]
+        return {column: pd.concat([crsp[column], pd.DataFrame(extension[column], columns=tickers)])
+                for column in FACTOR_COLUMNS}
 
 
 def _retry(call, attempts: int = 20, wait_seconds: int = 30):

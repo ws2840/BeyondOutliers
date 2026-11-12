@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-UNIVERSE_PATH = Path(__file__).resolve().parents[2] / "data" / "universe" / "sp500_universe.csv"
+UNIVERSE_PATH = Path(__file__).resolve().parents[2] / "data" / "universe" / "sp500_universe_early_end.csv"
 
 
 @lru_cache(maxsize=1)
