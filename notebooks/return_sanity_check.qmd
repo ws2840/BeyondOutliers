@@ -133,6 +133,28 @@ plt.show()
 ```
 
 ```{python}
+from scipy.stats import norm
+
+ret, std = returns["ret"], returns["ret"].std()
+tail_5sd, normal_5sd = (ret.abs() > 5 * std).mean(), 2 * norm.sf(5)
+big = ret[ret.abs() > 0.05]
+hour_std = ret.groupby(returns["hour"]).std() * 1e4
+Markdown(f"""
+**Observations**
+
+- **Fat tails.** Excess kurtosis is {ret.kurt():.0f}; moves beyond 5 standard deviations occur
+  {tail_5sd / normal_5sd:,.0f} times more often than under a normal. The normal badly understates tail risk.
+- **Peaked, roughly symmetric center.** Skewness is {ret.skew():.2f} and the median {ret.median() * 1e4:.1f} bp;
+  typical hours are quieter than the standard deviation suggests.
+- **Overnight drives the tails.** {(big.index.hour == 10).mean():.0%} of moves above 5% are 10:00 bars
+  (std {hour_std[10]:.0f} bp vs. {hour_std.drop(10).min():.0f}–{hour_std.drop(10).max():.0f} bp for other hours),
+  so the overnight gap should be modeled or scaled separately.
+- **Implication.** A few extreme hours would dominate least squares, which motivates robust estimation.
+  Most large moves are real events; three are ticker-reuse artifacts (IR, FOX, FOXA).
+""")
+```
+
+```{python}
 #| fig-cap: "Standard deviation of hourly returns by bar (10:00 includes the overnight gap)."
 by_hour = returns.groupby("hour")["ret"].std()
 fig, ax = plt.subplots()
@@ -146,6 +168,20 @@ Largest absolute hourly returns (candidates for outlier review):
 ```{python}
 top = returns.reset_index().assign(abs_ret=lambda d: d["ret"].abs()).nlargest(15, "abs_ret")
 table(top[["ts", "ticker", "ret"]].assign(ts=lambda d: d["ts"].dt.strftime("%Y-%m-%d %H:%M")).set_index("ts"))
+```
+
+```{=latex}
+\begingroup\color{red}
+\textbf{MRNA +110\% (2026-08-19 10:00) is real.} Moderna and Merck reported positive Phase 3 results for
+their mRNA melanoma vaccine before the open. The first hour traded 7.1M shares (about 0.1M normally), and Yahoo
+confirms the day: \$62.96 $\to$ \$174.38 (+177\%) on 30$\times$ average volume. A genuine outlier; keep it.
+
+\textbf{IR $-75\%$ (2020-03-02 10:00) is an artifact:} the ticker passed from Ingersoll-Rand plc (\$129, now TT)
+to Gardner Denver's Ingersoll Rand Inc (\$33), so the return spans two companies; the true move was about $+1\%$. Remove it.
+
+\textbf{FANG $-52\%$ (2020-03-09 10:00) is real:} oil price-war crash; \$48.56 $\to$ \$23.37 in the first hour,
+CRSP $-44.6\%$ for the day. Keep it.
+\par\endgroup
 ```
 
 ## 3. Split Adjustment
