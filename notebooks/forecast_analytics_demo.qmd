@@ -3,9 +3,14 @@ title: "Forecast Analytics — Individual Forecast Diagnostics"
 subtitle: "Raw-return target | Simulated hourly forecasts for the next trading day"
 author: "Quant Research Project"
 format:
-  html:
-    toc: true
-    code-fold: true
+  pdf:
+    documentclass: article
+    fontsize: 11pt
+    geometry: margin=1in
+    toc: false
+    number-sections: false
+    include-in-header:
+      text: \usepackage{needspace}
 execute:
   echo: false
   warning: false
