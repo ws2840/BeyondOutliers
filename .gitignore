@@ -224,8 +224,3 @@ __marimo__/
 /.quarto/
 **/*.quarto_ipynb
 .DS_STORE
-
-# Forecast Analytics generated outputs
-/Python/forecasts/forecast_analytics_demo.html
-/Python/forecasts/forecast_analytics_demo.pdf
-/Python/forecasts/forecast_analytics_demo_files/
