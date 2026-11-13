@@ -35,4 +35,4 @@ We will build and backtest an end-to-end US equity portfolio, covering market da
 
 Fred Chen(hc3728), Xinye Xie(xx2494), Qingyang Wang(qw2468), Jiao Xu(jx2687), Weikun Zhang(wz2559), Wen Sheng(ws2840)
 
-![Project pipeline, from market data and alpha forecasts to positions and performance.](figures/pipeline_diagram.png){width=55%}
+![Project pipeline, from market data and alpha forecasts to positions and performance.](notebooks/figures/pipeline_diagram.png){width=55%}
