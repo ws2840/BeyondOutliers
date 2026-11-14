@@ -1,0 +1,154 @@
+factor,cluster,description,direction,long_leg,original_paper,original_sample,significant_in_original,hxz_group
+cowc_gr1a,Accruals,Change in current operating working capital,-1,low characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+oaccruals_at,Accruals,Operating accruals,-1,low characteristic,Sloan (1996),1962 - 1991,yes,INVESTMENT
+oaccruals_ni,Accruals,Percent operating accruals,-1,low characteristic,Hafzalla Lundholm and Van Winkle (2011),1989 - 2008,yes,INVESTMENT
+seas_16_20na,Accruals,"Years 16-20 lagged returns, nonannual",-1,low characteristic,Heston and Sadka (2008),1965 - 2002,yes,INTANGIBLES
+taccruals_at,Accruals,Total accruals,-1,low characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+taccruals_ni,Accruals,Percent total accruals,-1,low characteristic,Hafzalla Lundholm and Van Winkle (2011),1989 - 2008,yes,INVESTMENT
+capex_abn,Debt Issuance,Abnormal corporate investment,-1,low characteristic,Titman Wei and Xie (2004),1973 - 1996,yes,INVESTMENT
+debt_gr3,Debt Issuance,Growth in book debt (3 years),-1,low characteristic,Lyandres Sun and Zhang (2008),1970 - 2005,yes,INVESTMENT
+fnl_gr1a,Debt Issuance,Change in financial liabilities,-1,low characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+ncol_gr1a,Debt Issuance,Change in noncurrent operating liabilities,-1,low characteristic,Richardson et al. (2005),1962 - 2001,no,INVESTMENT
+nfna_gr1a,Debt Issuance,Change in net financial assets,1,high characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+ni_ar1,Debt Issuance,Earnings persistence,1,high characteristic,Francis et al. (2004),1975 - 2001,no,INTANGIBLES
+noa_at,Debt Issuance,Net operating assets,-1,low characteristic,Hirshleifer et al. (2004),1964-2002,yes,INVESTMENT
+aliq_at,Investment,Liquidity of book assets,-1,low characteristic,Ortiz-Molina and Phillips (2014),1984 - 2006,no,INTANGIBLES
+at_gr1,Investment,Asset Growth,-1,low characteristic,Cooper Gulen and Schill (2008),1968 - 2003,yes,INVESTMENT
+be_gr1a,Investment,Change in common equity,-1,low characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+capx_gr1,Investment,CAPEX growth (1 year),-1,low characteristic,Xie (2001),1971-1992,no,INVESTMENT
+capx_gr2,Investment,CAPEX growth (2 years),-1,low characteristic,Anderson and Garcia-Feijoo (2006),1976 - 1998,yes,INVESTMENT
+capx_gr3,Investment,CAPEX growth (3 years),-1,low characteristic,Anderson and Garcia-Feijoo (2006),1976 - 1998,yes,INVESTMENT
+coa_gr1a,Investment,Change in current operating assets,-1,low characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+col_gr1a,Investment,Change in current operating liabilities,-1,low characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+emp_gr1,Investment,Hiring rate,-1,low characteristic,Belo Lin and Bazdresch (2014),1965 - 2010,yes,INTANGIBLES
+inv_gr1,Investment,Inventory growth,-1,low characteristic,Belo and Lin (2011),1965 - 2009,yes,INVESTMENT
+inv_gr1a,Investment,Inventory change,-1,low characteristic,Thomas and Zhang (2002),1970 - 1997,yes,INVESTMENT
+lnoa_gr1a,Investment,Change in long-term net operating assets,-1,low characteristic,Fairfield Whisenant and Yohn (2003),1964 - 1993,yes,INVESTMENT
+mispricing_mgmt,Investment,Mispricing factor: Management,1,high characteristic,Stambaugh and Yuan (2016),1967 - 2013,yes,NEW
+ncoa_gr1a,Investment,Change in noncurrent operating assets,-1,low characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+nncoa_gr1a,Investment,Change in net noncurrent operating assets,-1,low characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+noa_gr1a,Investment,Change in net operating assets,-1,low characteristic,Hirshleifer et al. (2004),1964-2002,yes,INVESTMENT
+ppeinv_gr1a,Investment,Change PPE and Inventory,-1,low characteristic,Lyandres Sun and Zhang (2008),1970 - 2005,yes,INVESTMENT
+ret_60_12,Investment,Long-term reversal,-1,low characteristic,De Bondt and Thaler (1985),1926 - 1982,yes,VALUE
+sale_gr1,Investment,Sales Growth (1 year),-1,low characteristic,Lakonishok Shleifer and Vishny (1994),1968 - 1989,yes,VALUE
+sale_gr3,Investment,Sales Growth (3 years),-1,low characteristic,Lakonishok Shleifer and Vishny (1994),1968 - 1989,yes,VALUE
+saleq_gr1,Investment,Sales growth (1 quarter),-1,low characteristic,,1967 - 2016,no,Profitability
+seas_2_5na,Investment,"Years 2-5 lagged returns, nonannual",-1,low characteristic,Heston and Sadka (2008),1965 - 2002,yes,INTANGIBLES
+age,Low Leverage,Firm age,-1,low characteristic,Jiang Lee and Zhang (2005),1965 - 2001,yes,INTANGIBLES
+aliq_mat,Low Leverage,Liquidity of market assets,-1,low characteristic,Ortiz-Molina and Phillips (2014),1984 - 2006,no,INTANGIBLES
+at_be,Low Leverage,Book leverage,-1,low characteristic,Fama and French (1992),1963 - 1990,no,Profitability
+bidaskhl_21d,Low Leverage,The high-low bid-ask spread,1,high characteristic,Corwin and Schultz (2012),1927 - 2006,yes,TRADING FRICTIONS
+cash_at,Low Leverage,Cash-to-assets,1,high characteristic,Palazzo (2012),1972 - 2009,no,INTANGIBLES
+netdebt_me,Low Leverage,Net debt-to-price,-1,low characteristic,Penman Richardson and Tuna (2007),1962 - 2001,yes,VALUE
+ni_ivol,Low Leverage,Earnings volatility,1,high characteristic,Francis et al. (2004),1975 - 2001,no,INTANGIBLES
+rd5_at,Low Leverage,R&D capital-to-book assets,1,high characteristic,Li (2011),1952 - 2004,no,INTANGIBLES
+rd_sale,Low Leverage,R&D-to-sales,1,high characteristic,Chan Lakonishok and Sougiannis (2001),1975 - 1995,no,INTANGIBLES
+tangibility,Low Leverage,Asset tangibility,1,high characteristic,Hahn and Lee (2009),1973-2001,no,INTANGIBLES
+z_score,Low Leverage,Altman Z-score,1,high characteristic,Dichev (1998),1981 - 1995,yes,Profitability
+beta_60m,Low Risk,Market Beta,-1,low characteristic,Fama and MacBeth (1973),1935 - 1968,yes,TRADING FRICTIONS
+beta_dimson_21d,Low Risk,Dimson beta,-1,low characteristic,Dimson (1979),1955 - 1974,no,TRADING FRICTIONS
+betabab_1260d,Low Risk,Frazzini-Pedersen market beta,-1,low characteristic,Frazzini and Pedersen (2014),1926 - 2012,yes,TRADING FRICTIONS
+betadown_252d,Low Risk,Downside beta,-1,low characteristic,Ang Chen and Xing (2006),1963 - 2001,yes,TRADING FRICTIONS
+earnings_variability,Low Risk,Earnings variability,-1,low characteristic,Francis et al. (2004),1975 - 2001,no,INTANGIBLES
+ivol_capm_21d,Low Risk,Idiosyncratic volatility from the CAPM (21 days),-1,low characteristic,,1967 - 2016,no,TRADING FRICTIONS
+ivol_capm_252d,Low Risk,Idiosyncratic volatility from the CAPM (252 days),-1,low characteristic,Ali Hwang and Trombley (2003),1976 - 1997,yes,TRADING FRICTIONS
+ivol_ff3_21d,Low Risk,Idiosyncratic volatility from the Fama-French 3-factor model,-1,low characteristic,Ang et al. (2006),1963 - 2000,yes,TRADING FRICTIONS
+ivol_hxz4_21d,Low Risk,Idiosyncratic volatility from the q-factor model,-1,low characteristic,,1967 - 2016,no,TRADING FRICTIONS
+ocfq_saleq_std,Low Risk,Cash flow volatility,-1,low characteristic,Huang (2009),1980 - 2004,yes,INTANGIBLES
+rmax1_21d,Low Risk,Maximum daily return,-1,low characteristic,Bali Cakici and Whitelaw (2011),1962 -2005,yes,TRADING FRICTIONS
+rmax5_21d,Low Risk,Highest 5 days of return,-1,low characteristic,"Bali, Brown, Murray and Tang (2017)",1993 - 2012,yes,NEW
+rvol_21d,Low Risk,Return volatility,-1,low characteristic,Ang et al. (2006),1963 - 2000,yes,TRADING FRICTIONS
+seas_6_10na,Low Risk,"Years 6-10 lagged returns, nonannual",-1,low characteristic,Heston and Sadka (2008),1965 - 2002,yes,INTANGIBLES
+turnover_126d,Low Risk,Share turnover,-1,low characteristic,Datar Naik and Radcliffe (1998),1963 - 1991,yes,TRADING FRICTIONS
+zero_trades_126d,Low Risk,Number of zero trades with turnover as tiebreaker (6 months),1,high characteristic,Liu (2006),1963 - 2003,yes,TRADING FRICTIONS
+zero_trades_21d,Low Risk,Number of zero trades with turnover as tiebreaker (1 month),1,high characteristic,Liu (2006),1963 - 2003,no,TRADING FRICTIONS
+zero_trades_252d,Low Risk,Number of zero trades with turnover as tiebreaker (12 months),1,high characteristic,Liu (2006),1963 - 2003,yes,TRADING FRICTIONS
+prc_highprc_252d,Momentum,Current price to high price over last year,1,high characteristic,George and Hwang (2004),1963 - 2001,yes,Momentum
+resff3_12_1,Momentum,Residual momentum t-12 to t-1,1,high characteristic,Blitz Huij and Martens (2011),1930 - 2009,yes,Momentum
+resff3_6_1,Momentum,Residual momentum t-6 to t-1,1,high characteristic,Blitz Huij and Martens (2011),1930 - 2009,yes,Momentum
+ret_12_1,Momentum,Price momentum t-12 to t-1,1,high characteristic,Jegadeesh and Titman (1993),1965 - 1989,yes,Momentum
+ret_3_1,Momentum,Price momentum t-3 to t-1,1,high characteristic,Jegedeesh and Titman (1993),1965 - 1989,yes,NEW
+ret_6_1,Momentum,Price momentum t-6 to t-1,1,high characteristic,Jegadeesh and Titman (1993),1965 - 1989,yes,Momentum
+ret_9_1,Momentum,Price momentum t-9 to t-1,1,high characteristic,Jegedeesh and Titman (1993),1965 - 1989,yes,NEW
+seas_1_1na,Momentum,"Year 1-lagged return, nonannual",1,high characteristic,Heston and Sadka (2008),1965 - 2002,yes,INTANGIBLES
+dsale_dinv,Profit Growth,Change sales minus change Inventory,1,high characteristic,Abarbanell and Bushee (1998),1974 - 1988,yes,INTANGIBLES
+dsale_drec,Profit Growth,Change sales minus change receivables,-1,low characteristic,Abarbanell and Bushee (1998),1974 - 1988,no,INTANGIBLES
+dsale_dsga,Profit Growth,Change sales minus change SG&A,1,high characteristic,Abarbanell and Bushee (1998),1974 - 1988,no,INTANGIBLES
+niq_at_chg1,Profit Growth,Change in quarterly return on assets,1,high characteristic,,1972 - 2016,no,Profitability
+niq_be_chg1,Profit Growth,Change in quarterly return on equity,1,high characteristic,,1967 - 2016,no,Profitability
+niq_su,Profit Growth,Standardized earnings surprise,1,high characteristic,Foster Olsen and Shevlin (1984),1974 - 1981,yes,Momentum
+ocf_at_chg1,Profit Growth,Change in operating cash flow to assets,1,high characteristic,"Bouchard, Krüger, Landier and Thesmar (2019)",1990 - 2015,yes,NEW
+ret_12_7,Profit Growth,Price momentum t-12 to t-7,1,high characteristic,Novy-Marx (2012),1925 - 2010,yes,NEW
+sale_emp_gr1,Profit Growth,Labor force efficiency,1,high characteristic,Abarbanell and Bushee (1998),1974 - 1988,no,INTANGIBLES
+saleq_su,Profit Growth,Standardized Revenue surprise,1,high characteristic,Jegadeesh and Livnat (2006),1987 - 2003,yes,Momentum
+seas_1_1an,Profit Growth,"Year 1-lagged return, annual",1,high characteristic,Heston and Sadka (2008),1965 - 2002,yes,INTANGIBLES
+tax_gr1a,Profit Growth,Tax expense surprise,1,high characteristic,Thomas and Zhang (2011),1977 - 2006,yes,Momentum
+dolvol_var_126d,Profitability,Coefficient of variation for dollar trading volume,-1,low characteristic,Chordia Subrahmanyam and Anshuman (2001),1966 - 1995,yes,TRADING FRICTIONS
+ebit_bev,Profitability,Return on net operating assets,1,high characteristic,Soliman (2008),1984 - 2002,yes,Profitability
+ebit_sale,Profitability,Profit margin,1,high characteristic,Soliman (2008),1984 - 2002,yes,Profitability
+f_score,Profitability,Pitroski F-score,1,high characteristic,Piotroski (2000),1976 - 1996,yes,Profitability
+ni_be,Profitability,Return on equity,1,high characteristic,Haugen and Baker (1996),1979 - 1993,yes,NEW
+niq_be,Profitability,Quarterly return on equity,1,high characteristic,Hou Xue and Zhang (2015),1972 - 2012,yes,Profitability
+o_score,Profitability,Ohlson O-score,-1,low characteristic,Dichev (1998),1981 - 1995,yes,Profitability
+ocf_at,Profitability,Operating cash flow to assets,1,high characteristic,"Bouchard, Krüger, Landier and Thesmar (2019)",1990 - 2015,yes,NEW
+ope_be,Profitability,Operating profits-to-book equity,1,high characteristic,Fama and French (2015),1963 - 2013,yes,Profitability
+ope_bel1,Profitability,Operating profits-to-lagged book equity,1,high characteristic,,1967 - 2016,no,Profitability
+turnover_var_126d,Profitability,Coefficient of variation for share turnover,-1,low characteristic,Chordia Subrahmanyam and Anshuman (2001),1966 - 1995,yes,TRADING FRICTIONS
+at_turnover,Quality,Capital turnover,1,high characteristic,Haugen and Baker (1996),1979 - 1993,no,Profitability
+cop_at,Quality,Cash-based operating profits-to-book assets,1,high characteristic,,1967 - 2016,no,Profitability
+cop_atl1,Quality,Cash-based operating profits-to-lagged book assets,1,high characteristic,Ball et al. (2016),1963 - 2014,yes,Profitability
+dgp_dsale,Quality,Change gross margin minus change sales,1,high characteristic,Abarbanell and Bushee (1998),1974 - 1988,no,INTANGIBLES
+gp_at,Quality,Gross profits-to-assets,1,high characteristic,Novy-Marx (2013),1963 - 2010,yes,Profitability
+gp_atl1,Quality,Gross profits-to-lagged assets,1,high characteristic,,1967 - 2016,no,Profitability
+mispricing_perf,Quality,Mispricing factor: Performance,1,high characteristic,Stambaugh and Yuan (2016),1967 - 2013,yes,NEW
+ni_inc8q,Quality,Number of consecutive quarters with earnings increases,1,high characteristic,Barth Elliott and Finn (1999),1982 - 1992,no,Momentum
+niq_at,Quality,Quarterly return on assets,1,high characteristic,Balakrishnan Bartov and Faurel (2010),1976 - 2005,yes,Profitability
+op_at,Quality,Operating profits-to-book assets,1,high characteristic,,1963 - 2013,yes,Profitability
+op_atl1,Quality,Operating profits-to-lagged book assets,1,high characteristic,Ball et al. (2016),1963 - 2014,yes,Profitability
+opex_at,Quality,Operating leverage,1,high characteristic,Novy-Marx (2011),1963 - 2008,yes,INTANGIBLES
+qmj,Quality,Quality minus Junk: Composite,1,high characteristic,"Assness, Frazzini and Pedersen (2018)",1957 - 2016,yes,NEW
+qmj_growth,Quality,Quality minus Junk: Growth,1,high characteristic,"Assness, Frazzini and Pedersen (2018)",1957 - 2016,yes,NEW
+qmj_prof,Quality,Quality minus Junk: Profitability,1,high characteristic,"Assness, Frazzini and Pedersen (2018)",1957 - 2016,yes,NEW
+qmj_safety,Quality,Quality minus Junk: Safety,1,high characteristic,"Assness, Frazzini and Pedersen (2018)",1957 - 2016,yes,NEW
+sale_bev,Quality,Asset turnover,1,high characteristic,Soliman (2008),1984 - 2002,yes,Profitability
+corr_1260d,Seasonality,Market correlation,-1,low characteristic,"Assness, Frazzini, Gormsen, Pedersen (2020)",1925 - 2015,yes,NEW
+coskew_21d,Seasonality,Coskewness,-1,low characteristic,Harvey and Siddique (2000),1963 - 1993,yes,TRADING FRICTIONS
+dbnetis_at,Seasonality,Net debt issuance,-1,low characteristic,Bradshaw Richardson and Sloan (2006),1971 - 2000,yes,INVESTMENT
+kz_index,Seasonality,Kaplan-Zingales index,1,high characteristic,Lamont Polk and Saa-Requejo (2001),1968-1995,yes,INTANGIBLES
+lti_gr1a,Seasonality,Change in long-term investments,-1,low characteristic,Richardson et al. (2005),1962 - 2001,yes,INVESTMENT
+pi_nix,Seasonality,Taxable income-to-book income,1,high characteristic,Lev and Nissim (2004),1973-2000,yes,Profitability
+seas_11_15an,Seasonality,"Years 11-15 lagged returns, annual",1,high characteristic,Heston and Sadka (2008),1965 - 2002,yes,INTANGIBLES
+seas_11_15na,Seasonality,"Years 11-15 lagged returns, nonannual",-1,low characteristic,Heston and Sadka (2008),1965 - 2002,no,INTANGIBLES
+seas_16_20an,Seasonality,"Years 16-20 lagged returns, annual",1,high characteristic,Heston and Sadka (2008),1965 - 2002,yes,INTANGIBLES
+seas_2_5an,Seasonality,"Years 2-5 lagged returns, annual",1,high characteristic,Heston and Sadka (2008),1965 - 2002,yes,INTANGIBLES
+seas_6_10an,Seasonality,"Years 6-10 lagged returns, annual",1,high characteristic,Heston and Sadka (2008),1965 - 2002,yes,INTANGIBLES
+sti_gr1a,Seasonality,Change in short-term investments,1,high characteristic,Richardson et al. (2005),1962 - 2001,no,INVESTMENT
+iskew_capm_21d,Short-Term Reversal,Idiosyncratic skewness from the CAPM,-1,low characteristic,,1967 - 2016,no,TRADING FRICTIONS
+iskew_ff3_21d,Short-Term Reversal,Idiosyncratic skewness from the Fama-French 3-factor model,-1,low characteristic,Bali Engle and Murray (2016),1925-2012,yes,TRADING FRICTIONS
+iskew_hxz4_21d,Short-Term Reversal,Idiosyncratic skewness from the q-factor model,-1,low characteristic,,1967 - 2016,no,TRADING FRICTIONS
+ret_1_0,Short-Term Reversal,Short-term reversal,-1,low characteristic,Jegadeesh (1990),1929 - 1982,yes,TRADING FRICTIONS
+rmax5_rvol_21d,Short-Term Reversal,Highest 5 days of return scaled by volatility,-1,low characteristic,"Assness, Frazzini, Gormsen, Pedersen (2020)",1925-2015,yes,NEW
+rskew_21d,Short-Term Reversal,Total skewness,-1,low characteristic,Bali Engle and Murray (2016),1925-2012,yes,TRADING FRICTIONS
+ami_126d,Size,Amihud Measure,1,high characteristic,Amihud (2002),1964 - 1997,yes,TRADING FRICTIONS
+dolvol_126d,Size,Dollar trading volume,-1,low characteristic,Brennan Chordia and Subrahmanyam (1998),1966 - 1995,yes,TRADING FRICTIONS
+market_equity,Size,Market Equity,-1,low characteristic,Banz (1981),1926 - 1975,yes,TRADING FRICTIONS
+prc,Size,Price per share,-1,low characteristic,Miller and Scholes (1982),1940 - 1978,yes,TRADING FRICTIONS
+rd_me,Size,R&D-to-market,1,high characteristic,Chan Lakonishok and Sougiannis (2001),1975 - 1995,yes,INTANGIBLES
+at_me,Value,Assets-to-market,1,high characteristic,Fama and French (1992),1963 - 1990,no,VALUE
+be_me,Value,Book-to-market equity,1,high characteristic,Rosenberg Reid and Lanstein (1985),1973 - 1984,yes,VALUE
+bev_mev,Value,Book-to-market enterprise value,1,high characteristic,Penman Richardson and Tuna (2007),1962 - 2001,yes,VALUE
+chcsho_12m,Value,Net stock issues,-1,low characteristic,Pontiff and Woodgate (2008),1970 - 2003,yes,INVESTMENT
+debt_me,Value,Debt-to-market,1,high characteristic,Bhandari (1988),1948 - 1979,yes,VALUE
+div12m_me,Value,Dividend yield,1,high characteristic,Litzenberger and Ramaswamy (1979),1940 -1980,yes,VALUE
+ebitda_mev,Value,Ebitda-to-market enterprise value,1,high characteristic,Loughran and Wellman (2011),1963 - 2009,yes,VALUE
+eq_dur,Value,Equity duration,-1,low characteristic,Dechow Sloan and Soliman (2004),1962 - 1998,yes,VALUE
+eqnetis_at,Value,Net equity issuance,-1,low characteristic,Bradshaw Richardson and Sloan (2006),1971 - 2000,yes,INVESTMENT
+eqnpo_12m,Value,Equity net payout,1,high characteristic,Daniel and Titman (2006),1968 - 2003,yes,INVESTMENT
+eqnpo_me,Value,Net payout yield,1,high characteristic,Boudoukh et al. (2007),1984 - 2003,yes,VALUE
+eqpo_me,Value,Payout yield,1,high characteristic,Boudoukh et al. (2007),1984 - 2003,yes,VALUE
+fcf_me,Value,Free cash flow-to-price,1,high characteristic,Lakonishok Shleifer and Vishny (1994),1963 - 1990,yes,VALUE
+ival_me,Value,Intrinsic value-to-market,1,high characteristic,Frankel and Lee (1998),1975 - 1993,no,VALUE
+netis_at,Value,Net total issuance,-1,low characteristic,Bradshaw Richardson and Sloan (2006),1971 - 2000,yes,INVESTMENT
+ni_me,Value,Earnings-to-price,1,high characteristic,Basu (1983),1963-1979,yes,VALUE
+ocf_me,Value,Operating cash flow-to-market,1,high characteristic,Desai Rajgopal and Venkatachalam (2004),1973 - 1997,yes,VALUE
+sale_me,Value,Sales-to-market,1,high characteristic,Barbee Mukherji and Raines (1996),1979-1991,yes,VALUE

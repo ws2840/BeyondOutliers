@@ -1,0 +1,4 @@
+# large / regenerable: keep out of git (GitHub rejects files > 100 MB)
+raw/
+all.parquet
+cov_cube.npz

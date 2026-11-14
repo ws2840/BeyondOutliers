@@ -1,0 +1,446 @@
+column,category,in_153,cluster,direction,description,source_of_description,dtype,non_null_share_in_sample
+ticker,id,False,,,Ticker symbol (not a stable identifier; use id/permno),JKP documentation (paraphrased),str,1.0
+id,id,False,,,Unique security id. CRSP stocks: PERMNO. Compustat-only stocks: exchange digit + gvkey + iid,JKP documentation (paraphrased),float64,1.0
+permno,id,False,,,CRSP permanent security number,JKP documentation (paraphrased),float64,1.0
+permco,id,False,,,CRSP permanent company number,JKP documentation (paraphrased),float64,1.0
+gvkey,id,False,,,Compustat company key,JKP documentation (paraphrased),int64,1.0
+iid,id,False,,,Compustat issue id (security within a company),JKP documentation (paraphrased),int64,1.0
+excntry,filter,False,,,Country of the exchange (ISO-3); 'USA' for US,JKP documentation (paraphrased),str,1.0
+exch_main,filter,False,,,1 = traded on a main exchange (CRSP exchcd 1/2/3); keep = 1,JKP documentation (paraphrased),float64,1.0
+common,filter,False,,,1 = common stock (CRSP shrcd 10/11/12); keep = 1,JKP documentation (paraphrased),float64,1.0
+primary_sec,filter,False,,,1 = primary security of the firm (always 1 for CRSP); keep = 1,JKP documentation (paraphrased),float64,1.0
+bidask,filter,False,,,1 = price is a bid/ask average (CRSP PRCSTD=4) rather than a trade,JKP documentation (paraphrased),float64,1.0
+crsp_shrcd,filter,False,,,CRSP share code,JKP documentation (paraphrased),float64,1.0
+crsp_exchcd,filter,False,,,"CRSP exchange code (1 NYSE, 2 AMEX, 3 Nasdaq); NYSE used for size breakpoints",JKP documentation (paraphrased),float64,1.0
+comp_tpci,filter,False,,,Compustat issue type code (Compustat-sourced rows only),JKP documentation (paraphrased),float64,0.0
+comp_exchg,filter,False,,,Compustat exchange code (Compustat-sourced rows only; 11 = NYSE),JKP documentation (paraphrased),float64,0.0
+curcd,market,False,,,Currency of local price/return,JKP documentation (paraphrased),str,1.0
+fx,market,False,,,FX rate local currency -> USD,JKP documentation (paraphrased),float64,1.0
+date,time,False,,,Date of the last return observation in the month,JKP documentation (paraphrased),str,1.0
+eom,time,False,,,End of month; characteristics use only information available by this date,JKP documentation (paraphrased),str,1.0
+adjfct,market,False,,,Share adjustment factor (CRSP CFACSHR),JKP documentation (paraphrased),float64,1.0
+shares,market,False,,,Shares outstanding (millions),JKP documentation (paraphrased),float64,1.0
+me,market,False,,,"Market equity = price x shares, USD millions",JKP documentation (paraphrased),float64,1.0
+me_company,market,False,,,Market equity summed over all securities of the company,JKP documentation (paraphrased),float64,1.0
+prc,factor_153,True,Size,-1,Price per share,Factor Details.xlsx (official),float64,1.0
+prc_local,market,False,,,"Month-end price, local currency",JKP documentation (paraphrased),float64,1.0
+prc_high,market,False,,,Highest price during the month,JKP documentation (paraphrased),float64,1.0
+prc_low,market,False,,,Lowest price during the month,JKP documentation (paraphrased),float64,1.0
+dolvol,market,False,,,Dollar volume during the month,JKP documentation (paraphrased),float64,1.0
+tvol,market,False,,,Share trading volume during the month,JKP documentation (paraphrased),float64,1.0
+ret,return,False,,,"Total return in month t (USD, includes delisting returns)",JKP documentation (paraphrased),float64,1.0
+ret_local,return,False,,,"Total return in month t, local currency",JKP documentation (paraphrased),float64,1.0
+ret_exc,return,False,,,Excess return in month t = ret - 1m T-bill,JKP documentation (paraphrased),float64,1.0
+ret_lag_dif,return,False,,,Months since previous return observation (1 for CRSP),JKP documentation (paraphrased),float64,1.0
+source_crsp,filter,False,,,"1 = return comes from CRSP, 0 = Compustat",JKP documentation (paraphrased),float64,1.0
+ret_exc_lead1m,return,False,,,Excess return in month t+1 -> the target used to build factor returns (empty in the latest month),JKP documentation (paraphrased),float64,0.0
+obs_main,filter,False,,,1 = main observation when a security appears twice in a month (CRSP preferred); keep = 1,JKP documentation (paraphrased),float64,1.0
+gics,industry,False,,,GICS industry code,JKP documentation (paraphrased),float64,0.744
+sic,industry,False,,,SIC industry code,JKP documentation (paraphrased),float64,1.0
+naics,industry,False,,,NAICS industry code,JKP documentation (paraphrased),float64,1.0
+ff49,industry,False,,,Fama-French 49 industry,JKP documentation (paraphrased),float64,0.994
+size_grp,market,False,,,"NYSE size group: mega >80th pct, large 50-80, small 20-50, micro 1-20, nano <1",JKP documentation (paraphrased),str,1.0
+market_equity,factor_153,True,Size,-1,Market Equity,Factor Details.xlsx (official),float64,1.0
+div1m_me,other_characteristic,False,,,dividends over past 1 month / market equity,"naming convention (auto-parsed, verify)",float64,1.0
+divspc1m_me,other_characteristic,False,,,special dividends over past 1 month / market equity,"naming convention (auto-parsed, verify)",float64,0.0
+div3m_me,other_characteristic,False,,,dividends over past 3 months / market equity,"naming convention (auto-parsed, verify)",float64,0.998
+div6m_me,other_characteristic,False,,,dividends over past 6 months / market equity,"naming convention (auto-parsed, verify)",float64,0.996
+div12m_me,factor_153,True,Value,1,Dividend yield,Factor Details.xlsx (official),float64,0.994
+divspc12m_me,other_characteristic,False,,,special dividends over past 12 months / market equity,"naming convention (auto-parsed, verify)",float64,0.0
+eqnpo_1m,other_characteristic,False,,,equity net payout over past 1 months,"naming convention (auto-parsed, verify)",float64,1.0
+eqnpo_3m,other_characteristic,False,,,equity net payout over past 3 months,"naming convention (auto-parsed, verify)",float64,0.998
+eqnpo_6m,other_characteristic,False,,,equity net payout over past 6 months,"naming convention (auto-parsed, verify)",float64,0.996
+eqnpo_12m,factor_153,True,Value,1,Equity net payout,Factor Details.xlsx (official),float64,0.994
+chcsho_1m,other_characteristic,False,,,change in shares outstanding over past 1 months,"naming convention (auto-parsed, verify)",float64,1.0
+chcsho_3m,other_characteristic,False,,,change in shares outstanding over past 3 months,"naming convention (auto-parsed, verify)",float64,0.998
+chcsho_6m,other_characteristic,False,,,change in shares outstanding over past 6 months,"naming convention (auto-parsed, verify)",float64,0.996
+chcsho_12m,factor_153,True,Value,-1,Net stock issues,Factor Details.xlsx (official),float64,0.994
+ret_1_0,factor_153,True,Short-Term Reversal,-1,Short-term reversal,Factor Details.xlsx (official),float64,1.0
+ret_2_0,other_characteristic,False,,,cumulative return from month t-2 to t-0,"naming convention (auto-parsed, verify)",float64,0.998
+ret_3_0,other_characteristic,False,,,cumulative return from month t-3 to t-0,"naming convention (auto-parsed, verify)",float64,0.998
+ret_3_1,factor_153,True,Momentum,1,Price momentum t-3 to t-1,Factor Details.xlsx (official),float64,0.998
+ret_6_0,other_characteristic,False,,,cumulative return from month t-6 to t-0,"naming convention (auto-parsed, verify)",float64,0.996
+ret_6_1,factor_153,True,Momentum,1,Price momentum t-6 to t-1,Factor Details.xlsx (official),float64,0.996
+ret_9_0,other_characteristic,False,,,cumulative return from month t-9 to t-0,"naming convention (auto-parsed, verify)",float64,0.996
+ret_9_1,factor_153,True,Momentum,1,Price momentum t-9 to t-1,Factor Details.xlsx (official),float64,0.996
+ret_12_0,other_characteristic,False,,,cumulative return from month t-12 to t-0,"naming convention (auto-parsed, verify)",float64,0.994
+ret_12_1,factor_153,True,Momentum,1,Price momentum t-12 to t-1,Factor Details.xlsx (official),float64,0.994
+ret_12_7,factor_153,True,Profit Growth,1,Price momentum t-12 to t-7,Factor Details.xlsx (official),float64,0.994
+ret_18_1,other_characteristic,False,,,cumulative return from month t-18 to t-1,"naming convention (auto-parsed, verify)",float64,0.992
+ret_24_1,other_characteristic,False,,,cumulative return from month t-24 to t-1,"naming convention (auto-parsed, verify)",float64,0.987
+ret_24_12,other_characteristic,False,,,cumulative return from month t-24 to t-12,"naming convention (auto-parsed, verify)",float64,0.987
+ret_36_1,other_characteristic,False,,,cumulative return from month t-36 to t-1,"naming convention (auto-parsed, verify)",float64,0.979
+ret_36_12,other_characteristic,False,,,cumulative return from month t-36 to t-12,"naming convention (auto-parsed, verify)",float64,0.979
+ret_48_12,other_characteristic,False,,,cumulative return from month t-48 to t-12,"naming convention (auto-parsed, verify)",float64,0.975
+ret_48_1,other_characteristic,False,,,cumulative return from month t-48 to t-1,"naming convention (auto-parsed, verify)",float64,0.975
+ret_60_1,other_characteristic,False,,,cumulative return from month t-60 to t-1,"naming convention (auto-parsed, verify)",float64,0.964
+ret_60_12,factor_153,True,Investment,-1,Long-term reversal,Factor Details.xlsx (official),float64,0.964
+ret_60_36,other_characteristic,False,,,cumulative return from month t-60 to t-36,"naming convention (auto-parsed, verify)",float64,0.964
+seas_1_1an,factor_153,True,Profit Growth,1,"Year 1-lagged return, annual",Factor Details.xlsx (official),float64,0.994
+seas_1_1na,factor_153,True,Momentum,1,"Year 1-lagged return, nonannual",Factor Details.xlsx (official),float64,0.994
+seas_2_5an,factor_153,True,Seasonality,1,"Years 2-5 lagged returns, annual",Factor Details.xlsx (official),float64,0.966
+seas_2_5na,factor_153,True,Investment,-1,"Years 2-5 lagged returns, nonannual",Factor Details.xlsx (official),float64,0.966
+seas_6_10an,factor_153,True,Seasonality,1,"Years 6-10 lagged returns, annual",Factor Details.xlsx (official),float64,0.907
+seas_6_10na,factor_153,True,Low Risk,-1,"Years 6-10 lagged returns, nonannual",Factor Details.xlsx (official),float64,0.907
+seas_11_15an,factor_153,True,Seasonality,1,"Years 11-15 lagged returns, annual",Factor Details.xlsx (official),float64,0.831
+seas_11_15na,factor_153,True,Seasonality,-1,"Years 11-15 lagged returns, nonannual",Factor Details.xlsx (official),float64,0.831
+seas_16_20an,factor_153,True,Seasonality,1,"Years 16-20 lagged returns, annual",Factor Details.xlsx (official),float64,0.761
+seas_16_20na,factor_153,True,Accruals,-1,"Years 16-20 lagged returns, nonannual",Factor Details.xlsx (official),float64,0.761
+assets,other_characteristic,False,,,total assets (USD millions),"naming convention (auto-parsed, verify)",float64,1.0
+sales,other_characteristic,False,,,sales (USD millions),"naming convention (auto-parsed, verify)",float64,1.0
+book_equity,other_characteristic,False,,,book equity (USD millions),"naming convention (auto-parsed, verify)",float64,0.943
+net_income,other_characteristic,False,,,net income (USD millions),"naming convention (auto-parsed, verify)",float64,1.0
+enterprise_value,other_characteristic,False,,,market enterprise value (USD millions),"naming convention (auto-parsed, verify)",float64,0.992
+at_gr1,factor_153,True,Investment,-1,Asset Growth,Factor Details.xlsx (official),float64,1.0
+ca_gr1,other_characteristic,False,,,1y % growth in current assets,"naming convention (auto-parsed, verify)",float64,0.958
+nca_gr1,other_characteristic,False,,,1y % growth in non-current assets,"naming convention (auto-parsed, verify)",float64,0.958
+lt_gr1,other_characteristic,False,,,1y % growth in total liabilities,"naming convention (auto-parsed, verify)",float64,1.0
+cl_gr1,other_characteristic,False,,,1y % growth in current liabilities,"naming convention (auto-parsed, verify)",float64,0.96
+ncl_gr1,other_characteristic,False,,,1y % growth in non-current liabilities,"naming convention (auto-parsed, verify)",float64,0.96
+be_gr1,other_characteristic,False,,,1y % growth in book equity,"naming convention (auto-parsed, verify)",float64,0.943
+pstk_gr1,other_characteristic,False,,,1y % growth in preferred stock,"naming convention (auto-parsed, verify)",float64,0.127
+debt_gr1,other_characteristic,False,,,1y % growth in total debt,"naming convention (auto-parsed, verify)",float64,0.998
+sale_gr1,factor_153,True,Investment,-1,Sales Growth (1 year),Factor Details.xlsx (official),float64,1.0
+cogs_gr1,other_characteristic,False,,,1y % growth in cost of goods sold,"naming convention (auto-parsed, verify)",float64,0.998
+sga_gr1,other_characteristic,False,,,1y % growth in SG&A,"naming convention (auto-parsed, verify)",float64,0.814
+opex_gr1,other_characteristic,False,,,1y % growth in operating expenses,"naming convention (auto-parsed, verify)",float64,1.0
+at_gr3,other_characteristic,False,,,3y % growth in total assets,"naming convention (auto-parsed, verify)",float64,0.992
+ca_gr3,other_characteristic,False,,,3y % growth in current assets,"naming convention (auto-parsed, verify)",float64,0.947
+nca_gr3,other_characteristic,False,,,3y % growth in non-current assets,"naming convention (auto-parsed, verify)",float64,0.947
+lt_gr3,other_characteristic,False,,,3y % growth in total liabilities,"naming convention (auto-parsed, verify)",float64,0.992
+cl_gr3,other_characteristic,False,,,3y % growth in current liabilities,"naming convention (auto-parsed, verify)",float64,0.953
+ncl_gr3,other_characteristic,False,,,3y % growth in non-current liabilities,"naming convention (auto-parsed, verify)",float64,0.953
+be_gr3,other_characteristic,False,,,3y % growth in book equity,"naming convention (auto-parsed, verify)",float64,0.928
+pstk_gr3,other_characteristic,False,,,3y % growth in preferred stock,"naming convention (auto-parsed, verify)",float64,0.144
+debt_gr3,factor_153,True,Debt Issuance,-1,Growth in book debt (3 years),Factor Details.xlsx (official),float64,0.992
+sale_gr3,factor_153,True,Investment,-1,Sales Growth (3 years),Factor Details.xlsx (official),float64,0.989
+cogs_gr3,other_characteristic,False,,,3y % growth in cost of goods sold,"naming convention (auto-parsed, verify)",float64,0.985
+sga_gr3,other_characteristic,False,,,3y % growth in SG&A,"naming convention (auto-parsed, verify)",float64,0.805
+opex_gr3,other_characteristic,False,,,3y % growth in operating expenses,"naming convention (auto-parsed, verify)",float64,0.989
+cash_gr1a,other_characteristic,False,,,"1y change in cash, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+inv_gr1a,factor_153,True,Investment,-1,Inventory change,Factor Details.xlsx (official),float64,0.977
+rec_gr1a,other_characteristic,False,,,"1y change in receivables, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.996
+ppeg_gr1a,other_characteristic,False,,,"1y change in gross PP&E, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.943
+lti_gr1a,factor_153,True,Seasonality,-1,Change in long-term investments,Factor Details.xlsx (official),float64,0.875
+intan_gr1a,other_characteristic,False,,,"1y change in intangibles, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.994
+debtst_gr1a,other_characteristic,False,,,"1y change in short-term debt, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+ap_gr1a,other_characteristic,False,,,"1y change in accounts payable, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.994
+txp_gr1a,other_characteristic,False,,,"1y change in taxes payable, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.892
+debtlt_gr1a,other_characteristic,False,,,"1y change in long-term debt, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+txditc_gr1a,other_characteristic,False,,,"1y change in deferred taxes & ITC, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.886
+coa_gr1a,factor_153,True,Investment,-1,Change in current operating assets,Factor Details.xlsx (official),float64,0.958
+col_gr1a,factor_153,True,Investment,-1,Change in current operating liabilities,Factor Details.xlsx (official),float64,0.96
+cowc_gr1a,factor_153,True,Accruals,-1,Change in current operating working capital,Factor Details.xlsx (official),float64,0.951
+ncoa_gr1a,factor_153,True,Investment,-1,Change in noncurrent operating assets,Factor Details.xlsx (official),float64,0.958
+ncol_gr1a,factor_153,True,Debt Issuance,-1,Change in noncurrent operating liabilities,Factor Details.xlsx (official),float64,0.96
+nncoa_gr1a,factor_153,True,Investment,-1,Change in net noncurrent operating assets,Factor Details.xlsx (official),float64,0.951
+oa_gr1a,other_characteristic,False,,,"1y change in operating assets, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.958
+ol_gr1a,other_characteristic,False,,,"1y change in operating liabilities, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.96
+noa_gr1a,factor_153,True,Investment,-1,Change in net operating assets,Factor Details.xlsx (official),float64,0.951
+fna_gr1a,other_characteristic,False,,,"1y change in financial assets, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+fnl_gr1a,factor_153,True,Debt Issuance,-1,Change in financial liabilities,Factor Details.xlsx (official),float64,1.0
+nfna_gr1a,factor_153,True,Debt Issuance,1,Change in net financial assets,Factor Details.xlsx (official),float64,1.0
+gp_gr1a,other_characteristic,False,,,"1y change in gross profit, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+ebitda_gr1a,other_characteristic,False,,,"1y change in EBITDA, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+ebit_gr1a,other_characteristic,False,,,"1y change in EBIT, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+ope_gr1a,other_characteristic,False,,,"1y change in operating profit to equity, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.919
+ni_gr1a,other_characteristic,False,,,"1y change in net income, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+nix_gr1a,other_characteristic,False,,,"1y change in net income incl. extraordinary items, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+dp_gr1a,other_characteristic,False,,,"1y change in depreciation, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.983
+ocf_gr1a,other_characteristic,False,,,"1y change in operating cash flow, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+fcf_gr1a,other_characteristic,False,,,"1y change in free cash flow, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.998
+nwc_gr1a,other_characteristic,False,,,"1y change in net working capital, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.951
+eqnetis_gr1a,other_characteristic,False,,,"1y change in net equity issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.998
+dltnetis_gr1a,other_characteristic,False,,,"1y change in net long-term debt issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+dstnetis_gr1a,other_characteristic,False,,,"1y change in net short-term debt issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+dbnetis_gr1a,other_characteristic,False,,,"1y change in net debt issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+netis_gr1a,other_characteristic,False,,,"1y change in net total issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.998
+fincf_gr1a,other_characteristic,False,,,"1y change in financing cash flow, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+eqnpo_gr1a,other_characteristic,False,,,"1y change in equity net payout, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.998
+tax_gr1a,factor_153,True,Profit Growth,1,Tax expense surprise,Factor Details.xlsx (official),float64,1.0
+div_gr1a,other_characteristic,False,,,"1y change in dividends, scaled by total assets","naming convention (auto-parsed, verify)",float64,1.0
+eqbb_gr1a,other_characteristic,False,,,"1y change in equity buybacks, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.968
+eqis_gr1a,other_characteristic,False,,,"1y change in equity issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.941
+eqpo_gr1a,other_characteristic,False,,,"1y change in equity payout, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.968
+capx_gr1a,other_characteristic,False,,,"1y change in capital expenditure, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.998
+cash_gr3a,other_characteristic,False,,,"3y change in cash, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.992
+inv_gr3a,other_characteristic,False,,,"3y change in inventory, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.962
+rec_gr3a,other_characteristic,False,,,"3y change in receivables, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.987
+ppeg_gr3a,other_characteristic,False,,,"3y change in gross PP&E, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.934
+lti_gr3a,other_characteristic,False,,,"3y change in long-term investments, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.86
+intan_gr3a,other_characteristic,False,,,"3y change in intangibles, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.981
+debtst_gr3a,other_characteristic,False,,,"3y change in short-term debt, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.992
+ap_gr3a,other_characteristic,False,,,"3y change in accounts payable, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.985
+txp_gr3a,other_characteristic,False,,,"3y change in taxes payable, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.877
+debtlt_gr3a,other_characteristic,False,,,"3y change in long-term debt, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.992
+txditc_gr3a,other_characteristic,False,,,"3y change in deferred taxes & ITC, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.862
+coa_gr3a,other_characteristic,False,,,"3y change in current operating assets, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.947
+col_gr3a,other_characteristic,False,,,"3y change in current operating liabilities, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.953
+cowc_gr3a,other_characteristic,False,,,"3y change in current operating working capital, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.943
+ncoa_gr3a,other_characteristic,False,,,"3y change in non-current operating assets, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.947
+ncol_gr3a,other_characteristic,False,,,"3y change in non-current operating liabilities, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.953
+nncoa_gr3a,other_characteristic,False,,,"3y change in net non-current operating assets, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.943
+oa_gr3a,other_characteristic,False,,,"3y change in operating assets, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.947
+ol_gr3a,other_characteristic,False,,,"3y change in operating liabilities, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.953
+fna_gr3a,other_characteristic,False,,,"3y change in financial assets, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.998
+fnl_gr3a,other_characteristic,False,,,"3y change in financial liabilities, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.992
+nfna_gr3a,other_characteristic,False,,,"3y change in net financial assets, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.992
+gp_gr3a,other_characteristic,False,,,"3y change in gross profit, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+ebitda_gr3a,other_characteristic,False,,,"3y change in EBITDA, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+ebit_gr3a,other_characteristic,False,,,"3y change in EBIT, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+ope_gr3a,other_characteristic,False,,,"3y change in operating profit to equity, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.913
+ni_gr3a,other_characteristic,False,,,"3y change in net income, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+nix_gr3a,other_characteristic,False,,,"3y change in net income incl. extraordinary items, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+dp_gr3a,other_characteristic,False,,,"3y change in depreciation, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.975
+ocf_gr3a,other_characteristic,False,,,"3y change in operating cash flow, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+fcf_gr3a,other_characteristic,False,,,"3y change in free cash flow, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.987
+nwc_gr3a,other_characteristic,False,,,"3y change in net working capital, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.943
+eqnetis_gr3a,other_characteristic,False,,,"3y change in net equity issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.987
+dltnetis_gr3a,other_characteristic,False,,,"3y change in net long-term debt issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+dstnetis_gr3a,other_characteristic,False,,,"3y change in net short-term debt issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+dbnetis_gr3a,other_characteristic,False,,,"3y change in net debt issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+netis_gr3a,other_characteristic,False,,,"3y change in net total issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.987
+fincf_gr3a,other_characteristic,False,,,"3y change in financing cash flow, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+eqnpo_gr3a,other_characteristic,False,,,"3y change in equity net payout, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.987
+tax_gr3a,other_characteristic,False,,,"3y change in income tax, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+div_gr3a,other_characteristic,False,,,"3y change in dividends, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.989
+eqbb_gr3a,other_characteristic,False,,,"3y change in equity buybacks, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.949
+eqis_gr3a,other_characteristic,False,,,"3y change in equity issuance, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.928
+eqpo_gr3a,other_characteristic,False,,,"3y change in equity payout, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.949
+capx_gr3a,other_characteristic,False,,,"3y change in capital expenditure, scaled by total assets","naming convention (auto-parsed, verify)",float64,0.987
+capx_at,other_characteristic,False,,,capital expenditure / total assets,"naming convention (auto-parsed, verify)",float64,0.998
+rd_at,other_characteristic,False,,,R&D / total assets,"naming convention (auto-parsed, verify)",float64,0.578
+gp_sale,other_characteristic,False,,,gross profit / sales,"naming convention (auto-parsed, verify)",float64,1.0
+ebitda_sale,other_characteristic,False,,,EBITDA / sales,"naming convention (auto-parsed, verify)",float64,1.0
+ebit_sale,factor_153,True,Profitability,1,Profit margin,Factor Details.xlsx (official),float64,1.0
+pi_sale,other_characteristic,False,,,pretax income / sales,"naming convention (auto-parsed, verify)",float64,1.0
+ni_sale,other_characteristic,False,,,net income / sales,"naming convention (auto-parsed, verify)",float64,1.0
+nix_sale,other_characteristic,False,,,net income incl. extraordinary items / sales,"naming convention (auto-parsed, verify)",float64,1.0
+ocf_sale,other_characteristic,False,,,operating cash flow / sales,"naming convention (auto-parsed, verify)",float64,1.0
+fcf_sale,other_characteristic,False,,,free cash flow / sales,"naming convention (auto-parsed, verify)",float64,0.998
+gp_at,factor_153,True,Quality,1,Gross profits-to-assets,Factor Details.xlsx (official),float64,1.0
+ebitda_at,other_characteristic,False,,,EBITDA / total assets,"naming convention (auto-parsed, verify)",float64,1.0
+ebit_at,other_characteristic,False,,,EBIT / total assets,"naming convention (auto-parsed, verify)",float64,1.0
+fi_at,other_characteristic,False,,,firm income / total assets,"naming convention (auto-parsed, verify)",float64,0.922
+cop_at,factor_153,True,Quality,1,Cash-based operating profits-to-book assets,Factor Details.xlsx (official),float64,1.0
+ope_be,factor_153,True,Profitability,1,Operating profits-to-book equity,Factor Details.xlsx (official),float64,0.864
+ni_be,factor_153,True,Profitability,1,Return on equity,Factor Details.xlsx (official),float64,0.943
+nix_be,other_characteristic,False,,,net income incl. extraordinary items / book equity,"naming convention (auto-parsed, verify)",float64,0.943
+ocf_be,other_characteristic,False,,,operating cash flow / book equity,"naming convention (auto-parsed, verify)",float64,0.943
+fcf_be,other_characteristic,False,,,free cash flow / book equity,"naming convention (auto-parsed, verify)",float64,0.941
+gp_bev,other_characteristic,False,,,gross profit / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.979
+ebitda_bev,other_characteristic,False,,,EBITDA / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.979
+ebit_bev,factor_153,True,Profitability,1,Return on net operating assets,Factor Details.xlsx (official),float64,0.979
+fi_bev,other_characteristic,False,,,firm income / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.907
+cop_bev,other_characteristic,False,,,cash-based operating profit / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.979
+gp_ppen,other_characteristic,False,,,gross profit / net PP&E,"naming convention (auto-parsed, verify)",float64,0.994
+ebitda_ppen,other_characteristic,False,,,EBITDA / net PP&E,"naming convention (auto-parsed, verify)",float64,0.994
+fcf_ppen,other_characteristic,False,,,free cash flow / net PP&E,"naming convention (auto-parsed, verify)",float64,0.992
+fincf_at,other_characteristic,False,,,financing cash flow / total assets,"naming convention (auto-parsed, verify)",float64,1.0
+netis_at,factor_153,True,Value,-1,Net total issuance,Factor Details.xlsx (official),float64,0.998
+eqnetis_at,factor_153,True,Value,-1,Net equity issuance,Factor Details.xlsx (official),float64,0.998
+eqis_at,other_characteristic,False,,,equity issuance / total assets,"naming convention (auto-parsed, verify)",float64,0.951
+dbnetis_at,factor_153,True,Seasonality,-1,Net debt issuance,Factor Details.xlsx (official),float64,1.0
+dltnetis_at,other_characteristic,False,,,net long-term debt issuance / total assets,"naming convention (auto-parsed, verify)",float64,1.0
+dstnetis_at,other_characteristic,False,,,net short-term debt issuance / total assets,"naming convention (auto-parsed, verify)",float64,1.0
+eqnpo_at,other_characteristic,False,,,equity net payout / total assets,"naming convention (auto-parsed, verify)",float64,0.998
+eqbb_at,other_characteristic,False,,,equity buybacks / total assets,"naming convention (auto-parsed, verify)",float64,0.972
+div_at,other_characteristic,False,,,dividends / total assets,"naming convention (auto-parsed, verify)",float64,1.0
+oaccruals_at,factor_153,True,Accruals,-1,Operating accruals,Factor Details.xlsx (official),float64,1.0
+oaccruals_ni,factor_153,True,Accruals,-1,Percent operating accruals,Factor Details.xlsx (official),float64,1.0
+taccruals_at,factor_153,True,Accruals,-1,Total accruals,Factor Details.xlsx (official),float64,1.0
+taccruals_ni,factor_153,True,Accruals,-1,Percent total accruals,Factor Details.xlsx (official),float64,1.0
+noa_at,factor_153,True,Debt Issuance,-1,Net operating assets,Factor Details.xlsx (official),float64,0.953
+be_bev,other_characteristic,False,,,book equity / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.926
+debt_bev,other_characteristic,False,,,total debt / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.979
+cash_bev,other_characteristic,False,,,cash / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.979
+pstk_bev,other_characteristic,False,,,preferred stock / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.979
+debtlt_bev,other_characteristic,False,,,long-term debt / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.979
+debtst_bev,other_characteristic,False,,,short-term debt / book enterprise value,"naming convention (auto-parsed, verify)",float64,0.979
+debt_mev,other_characteristic,False,,,total debt / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+pstk_mev,other_characteristic,False,,,preferred stock / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+debtlt_mev,other_characteristic,False,,,long-term debt / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+debtst_mev,other_characteristic,False,,,short-term debt / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+int_debtlt,other_characteristic,False,,,interest expense / long-term debt,"naming convention (auto-parsed, verify)",float64,0.919
+int_debt,other_characteristic,False,,,interest expense / total debt,"naming convention (auto-parsed, verify)",float64,0.919
+cash_lt,other_characteristic,False,,,cash / total liabilities,"naming convention (auto-parsed, verify)",float64,1.0
+inv_act,other_characteristic,False,,,inventory / act,"naming convention (auto-parsed, verify)",float64,0.86
+rec_act,other_characteristic,False,,,receivables / act,"naming convention (auto-parsed, verify)",float64,0.877
+ebitda_debt,other_characteristic,False,,,EBITDA / total debt,"naming convention (auto-parsed, verify)",float64,0.998
+debtst_debt,other_characteristic,False,,,short-term debt / total debt,"naming convention (auto-parsed, verify)",float64,0.998
+cl_lt,other_characteristic,False,,,current liabilities / total liabilities,"naming convention (auto-parsed, verify)",float64,0.962
+debtlt_debt,other_characteristic,False,,,long-term debt / total debt,"naming convention (auto-parsed, verify)",float64,0.998
+profit_cl,other_characteristic,False,,,profit / current liabilities,"naming convention (auto-parsed, verify)",float64,0.962
+ocf_cl,other_characteristic,False,,,operating cash flow / current liabilities,"naming convention (auto-parsed, verify)",float64,0.962
+ocf_debt,other_characteristic,False,,,operating cash flow / total debt,"naming convention (auto-parsed, verify)",float64,0.998
+lt_ppen,other_characteristic,False,,,total liabilities / net PP&E,"naming convention (auto-parsed, verify)",float64,0.994
+debtlt_be,other_characteristic,False,,,long-term debt / book equity,"naming convention (auto-parsed, verify)",float64,0.943
+fcf_ocf,other_characteristic,False,,,free cash flow / operating cash flow,"naming convention (auto-parsed, verify)",float64,0.983
+opex_at,factor_153,True,Quality,1,Operating leverage,Factor Details.xlsx (official),float64,1.0
+nwc_at,other_characteristic,False,,,net working capital / total assets,"naming convention (auto-parsed, verify)",float64,0.953
+debt_at,other_characteristic,False,,,total debt / total assets,"naming convention (auto-parsed, verify)",float64,1.0
+debt_be,other_characteristic,False,,,total debt / book equity,"naming convention (auto-parsed, verify)",float64,0.943
+ebit_int,other_characteristic,False,,,EBIT / interest expense,"naming convention (auto-parsed, verify)",float64,0.907
+cash_cl,other_characteristic,False,,,cash / current liabilities,"naming convention (auto-parsed, verify)",float64,0.962
+caliq_cl,other_characteristic,False,,,liquid current assets / current liabilities,"naming convention (auto-parsed, verify)",float64,0.958
+ca_cl,other_characteristic,False,,,current assets / current liabilities,"naming convention (auto-parsed, verify)",float64,0.953
+inv_days,other_characteristic,False,,,inventory days,"naming convention (auto-parsed, verify)",float64,0.975
+rec_days,other_characteristic,False,,,receivable days,"naming convention (auto-parsed, verify)",float64,0.996
+ap_days,other_characteristic,False,,,payable days,"naming convention (auto-parsed, verify)",float64,0.992
+cash_conversion,other_characteristic,False,,,cash conversion cycle (inv_days + rec_days - ap_days),"naming convention (auto-parsed, verify)",float64,0.765
+inv_turnover,other_characteristic,False,,,inventory turnover,"naming convention (auto-parsed, verify)",float64,0.773
+at_turnover,factor_153,True,Quality,1,Capital turnover,Factor Details.xlsx (official),float64,1.0
+rec_turnover,other_characteristic,False,,,receivables turnover,"naming convention (auto-parsed, verify)",float64,0.992
+ap_turnover,other_characteristic,False,,,payables turnover,"naming convention (auto-parsed, verify)",float64,0.968
+spi_at,other_characteristic,False,,,special items / total assets,"naming convention (auto-parsed, verify)",float64,0.985
+xido_at,other_characteristic,False,,,extraordinary items / total assets,"naming convention (auto-parsed, verify)",float64,1.0
+nri_at,other_characteristic,False,,,non-recurring items / total assets,"naming convention (auto-parsed, verify)",float64,0.985
+adv_sale,other_characteristic,False,,,advertising / sales,"naming convention (auto-parsed, verify)",float64,0.451
+staff_sale,other_characteristic,False,,,staff expense / sales,"naming convention (auto-parsed, verify)",float64,0.174
+rd_sale,factor_153,True,Low Leverage,1,R&D-to-sales,Factor Details.xlsx (official),float64,0.578
+div_ni,other_characteristic,False,,,dividends / net income,"naming convention (auto-parsed, verify)",float64,0.97
+sale_bev,factor_153,True,Quality,1,Asset turnover,Factor Details.xlsx (official),float64,0.979
+sale_be,other_characteristic,False,,,sales / book equity,"naming convention (auto-parsed, verify)",float64,0.943
+sale_nwc,other_characteristic,False,,,sales / net working capital,"naming convention (auto-parsed, verify)",float64,0.72
+tax_pi,other_characteristic,False,,,income tax / pretax income,"naming convention (auto-parsed, verify)",float64,0.979
+be_me,factor_153,True,Value,1,Book-to-market equity,Factor Details.xlsx (official),float64,0.943
+at_me,factor_153,True,Value,1,Assets-to-market,Factor Details.xlsx (official),float64,1.0
+cash_me,other_characteristic,False,,,cash / market equity,"naming convention (auto-parsed, verify)",float64,1.0
+gp_me,other_characteristic,False,,,gross profit / market equity,"naming convention (auto-parsed, verify)",float64,1.0
+ebitda_me,other_characteristic,False,,,EBITDA / market equity,"naming convention (auto-parsed, verify)",float64,1.0
+ebit_me,other_characteristic,False,,,EBIT / market equity,"naming convention (auto-parsed, verify)",float64,1.0
+ope_me,other_characteristic,False,,,operating profit to equity / market equity,"naming convention (auto-parsed, verify)",float64,0.922
+ni_me,factor_153,True,Value,1,Earnings-to-price,Factor Details.xlsx (official),float64,1.0
+nix_me,other_characteristic,False,,,net income incl. extraordinary items / market equity,"naming convention (auto-parsed, verify)",float64,1.0
+sale_me,factor_153,True,Value,1,Sales-to-market,Factor Details.xlsx (official),float64,1.0
+ocf_me,factor_153,True,Value,1,Operating cash flow-to-market,Factor Details.xlsx (official),float64,1.0
+fcf_me,factor_153,True,Value,1,Free cash flow-to-price,Factor Details.xlsx (official),float64,0.998
+cop_me,other_characteristic,False,,,cash-based operating profit / market equity,"naming convention (auto-parsed, verify)",float64,1.0
+rd_me,factor_153,True,Size,1,R&D-to-market,Factor Details.xlsx (official),float64,0.578
+div_me,other_characteristic,False,,,dividends / market equity,"naming convention (auto-parsed, verify)",float64,1.0
+eqbb_me,other_characteristic,False,,,equity buybacks / market equity,"naming convention (auto-parsed, verify)",float64,0.972
+eqis_me,other_characteristic,False,,,equity issuance / market equity,"naming convention (auto-parsed, verify)",float64,0.951
+eqpo_me,factor_153,True,Value,1,Payout yield,Factor Details.xlsx (official),float64,0.972
+eqnpo_me,factor_153,True,Value,1,Net payout yield,Factor Details.xlsx (official),float64,0.998
+eqnetis_me,other_characteristic,False,,,net equity issuance / market equity,"naming convention (auto-parsed, verify)",float64,0.998
+dltnetis_mev,other_characteristic,False,,,net long-term debt issuance / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+dstnetis_mev,other_characteristic,False,,,net short-term debt issuance / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+dbnetis_mev,other_characteristic,False,,,net debt issuance / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+netis_mev,other_characteristic,False,,,net total issuance / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.989
+at_mev,other_characteristic,False,,,total assets / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+be_mev,other_characteristic,False,,,book equity / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.934
+bev_mev,factor_153,True,Value,1,Book-to-market enterprise value,Factor Details.xlsx (official),float64,0.979
+ppen_mev,other_characteristic,False,,,net PP&E / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.985
+cash_mev,other_characteristic,False,,,cash / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+gp_mev,other_characteristic,False,,,gross profit / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+ebitda_mev,factor_153,True,Value,1,Ebitda-to-market enterprise value,Factor Details.xlsx (official),float64,0.992
+ebit_mev,other_characteristic,False,,,EBIT / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+cop_mev,other_characteristic,False,,,cash-based operating profit / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+sale_mev,other_characteristic,False,,,sales / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+ocf_mev,other_characteristic,False,,,operating cash flow / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+fcf_mev,other_characteristic,False,,,free cash flow / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.989
+fincf_mev,other_characteristic,False,,,financing cash flow / market enterprise value,"naming convention (auto-parsed, verify)",float64,0.992
+ni_inc8q,factor_153,True,Quality,1,Number of consecutive quarters with earnings increases,Factor Details.xlsx (official),float64,0.985
+ppeinv_gr1a,factor_153,True,Investment,-1,Change PPE and Inventory,Factor Details.xlsx (official),float64,0.922
+lnoa_gr1a,factor_153,True,Investment,-1,Change in long-term net operating assets,Factor Details.xlsx (official),float64,0.97
+capx_gr1,factor_153,True,Investment,-1,CAPEX growth (1 year),Factor Details.xlsx (official),float64,0.964
+capx_gr2,factor_153,True,Investment,-1,CAPEX growth (2 years),Factor Details.xlsx (official),float64,0.966
+capx_gr3,factor_153,True,Investment,-1,CAPEX growth (3 years),Factor Details.xlsx (official),float64,0.96
+sti_gr1a,factor_153,True,Seasonality,1,Change in short-term investments,Factor Details.xlsx (official),float64,0.964
+niq_at,factor_153,True,Quality,1,Quarterly return on assets,Factor Details.xlsx (official),float64,1.0
+niq_at_chg1,factor_153,True,Profit Growth,1,Change in quarterly return on assets,Factor Details.xlsx (official),float64,0.996
+niq_be,factor_153,True,Profitability,1,Quarterly return on equity,Factor Details.xlsx (official),float64,0.943
+niq_be_chg1,factor_153,True,Profit Growth,1,Change in quarterly return on equity,Factor Details.xlsx (official),float64,0.93
+saleq_gr1,factor_153,True,Investment,-1,Sales growth (1 quarter),Factor Details.xlsx (official),float64,1.0
+rd5_at,factor_153,True,Low Leverage,1,R&D capital-to-book assets,Factor Details.xlsx (official),float64,0.564
+dsale_dinv,factor_153,True,Profit Growth,1,Change sales minus change Inventory,Factor Details.xlsx (official),float64,0.765
+dsale_drec,factor_153,True,Profit Growth,-1,Change sales minus change receivables,Factor Details.xlsx (official),float64,0.989
+dgp_dsale,factor_153,True,Quality,1,Change gross margin minus change sales,Factor Details.xlsx (official),float64,0.998
+dsale_dsga,factor_153,True,Profit Growth,1,Change sales minus change SG&A,Factor Details.xlsx (official),float64,0.811
+saleq_su,factor_153,True,Profit Growth,1,Standardized Revenue surprise,Factor Details.xlsx (official),float64,0.989
+niq_su,factor_153,True,Profit Growth,1,Standardized earnings surprise,Factor Details.xlsx (official),float64,0.989
+debt_me,factor_153,True,Value,1,Debt-to-market,Factor Details.xlsx (official),float64,1.0
+netdebt_me,factor_153,True,Low Leverage,-1,Net debt-to-price,Factor Details.xlsx (official),float64,1.0
+capex_abn,factor_153,True,Debt Issuance,-1,Abnormal corporate investment,Factor Details.xlsx (official),float64,0.96
+inv_gr1,factor_153,True,Investment,-1,Inventory growth,Factor Details.xlsx (official),float64,0.765
+be_gr1a,factor_153,True,Investment,-1,Change in common equity,Factor Details.xlsx (official),float64,0.943
+op_at,factor_153,True,Quality,1,Operating profits-to-book assets,Factor Details.xlsx (official),float64,1.0
+pi_nix,factor_153,True,Seasonality,1,Taxable income-to-book income,Factor Details.xlsx (official),float64,0.97
+op_atl1,factor_153,True,Quality,1,Operating profits-to-lagged book assets,Factor Details.xlsx (official),float64,1.0
+gp_atl1,factor_153,True,Quality,1,Gross profits-to-lagged assets,Factor Details.xlsx (official),float64,1.0
+ope_bel1,factor_153,True,Profitability,1,Operating profits-to-lagged book equity,Factor Details.xlsx (official),float64,0.867
+cop_atl1,factor_153,True,Quality,1,Cash-based operating profits-to-lagged book assets,Factor Details.xlsx (official),float64,1.0
+at_be,factor_153,True,Low Leverage,-1,Book leverage,Factor Details.xlsx (official),float64,0.943
+ocfq_saleq_std,factor_153,True,Low Risk,-1,Cash flow volatility,Factor Details.xlsx (official),float64,0.992
+aliq_at,factor_153,True,Investment,-1,Liquidity of book assets,Factor Details.xlsx (official),float64,0.958
+aliq_mat,factor_153,True,Low Leverage,-1,Liquidity of market assets,Factor Details.xlsx (official),float64,0.898
+tangibility,factor_153,True,Low Leverage,1,Asset tangibility,Factor Details.xlsx (official),float64,0.917
+eq_dur,factor_153,True,Value,-1,Equity duration,Factor Details.xlsx (official),float64,0.943
+f_score,factor_153,True,Profitability,1,Pitroski F-score,Factor Details.xlsx (official),float64,0.949
+o_score,factor_153,True,Profitability,-1,Ohlson O-score,Factor Details.xlsx (official),float64,0.949
+z_score,factor_153,True,Low Leverage,1,Altman Z-score,Factor Details.xlsx (official),float64,0.951
+kz_index,factor_153,True,Seasonality,1,Kaplan-Zingales index,Factor Details.xlsx (official),float64,0.922
+intrinsic_value,other_characteristic,False,,,residual-income intrinsic value (input to ival_me),"naming convention (auto-parsed, verify)",float64,0.917
+ival_me,factor_153,True,Value,1,Intrinsic value-to-market,Factor Details.xlsx (official),float64,0.917
+sale_emp_gr1,factor_153,True,Profit Growth,1,Labor force efficiency,Factor Details.xlsx (official),float64,0.998
+emp_gr1,factor_153,True,Investment,-1,Hiring rate,Factor Details.xlsx (official),float64,0.898
+cash_at,factor_153,True,Low Leverage,1,Cash-to-assets,Factor Details.xlsx (official),float64,1.0
+earnings_variability,factor_153,True,Low Risk,-1,Earnings variability,Factor Details.xlsx (official),float64,0.983
+ni_ar1,factor_153,True,Debt Issuance,1,Earnings persistence,Factor Details.xlsx (official),float64,0.981
+ni_ivol,factor_153,True,Low Leverage,1,Earnings volatility,Factor Details.xlsx (official),float64,0.981
+niq_saleq_std,other_characteristic,False,,,volatility of quarterly net income / sales,"naming convention (auto-parsed, verify)",float64,0.992
+ni_emp,other_characteristic,False,,,net income / employees,"naming convention (auto-parsed, verify)",float64,1.0
+sale_emp,other_characteristic,False,,,sales / employees,"naming convention (auto-parsed, verify)",float64,1.0
+ni_at,other_characteristic,False,,,net income / total assets,"naming convention (auto-parsed, verify)",float64,1.0
+ocf_at,factor_153,True,Profitability,1,Operating cash flow to assets,Factor Details.xlsx (official),float64,1.0
+ocf_at_chg1,factor_153,True,Profit Growth,1,Change in operating cash flow to assets,Factor Details.xlsx (official),float64,1.0
+roeq_be_std,other_characteristic,False,,,volatility of quarterly ROE,"naming convention (auto-parsed, verify)",float64,0.928
+roe_be_std,other_characteristic,False,,,volatility of annual ROE,"naming convention (auto-parsed, verify)",float64,0.907
+gpoa_ch5,other_characteristic,False,,,5y change in gross profit / assets,"naming convention (auto-parsed, verify)",float64,0.981
+roe_ch5,other_characteristic,False,,,5y change in ROE,"naming convention (auto-parsed, verify)",float64,0.905
+roa_ch5,other_characteristic,False,,,5y change in ROA,"naming convention (auto-parsed, verify)",float64,0.981
+cfoa_ch5,other_characteristic,False,,,5y change in cash flow / assets,"naming convention (auto-parsed, verify)",float64,0.981
+gmar_ch5,other_characteristic,False,,,5y change in gross margin,"naming convention (auto-parsed, verify)",float64,0.981
+beta_60m,factor_153,True,Low Risk,-1,Market Beta,Factor Details.xlsx (official),float64,0.981
+ivol_capm_60m,other_characteristic,False,,,"idiosyncratic volatility vs CAPM, 60 monthly obs","naming convention (auto-parsed, verify)",float64,0.981
+resff3_12_1,factor_153,True,Momentum,1,Residual momentum t-12 to t-1,Factor Details.xlsx (official),float64,0.987
+resff3_6_1,factor_153,True,Momentum,1,Residual momentum t-6 to t-1,Factor Details.xlsx (official),float64,0.987
+mispricing_perf,factor_153,True,Quality,1,Mispricing factor: Performance,Factor Details.xlsx (official),float64,1.0
+mispricing_mgmt,factor_153,True,Investment,1,Mispricing factor: Management,Factor Details.xlsx (official),float64,1.0
+bidaskhl_21d,factor_153,True,Low Leverage,1,The high-low bid-ask spread,Factor Details.xlsx (official),float64,1.0
+rvolhl_21d,other_characteristic,False,,,"high-low (Parkinson) volatility, 21 days","naming convention (auto-parsed, verify)",float64,1.0
+rskew_21d,factor_153,True,Short-Term Reversal,-1,Total skewness,Factor Details.xlsx (official),float64,1.0
+zero_trades_252d,factor_153,True,Low Risk,1,Number of zero trades with turnover as tiebreaker (12 months),Factor Details.xlsx (official),float64,0.996
+rvol_252d,other_characteristic,False,,,"return volatility, 252 days","naming convention (auto-parsed, verify)",float64,0.996
+dolvol_126d,factor_153,True,Size,-1,Dollar trading volume,Factor Details.xlsx (official),float64,0.998
+dolvol_var_126d,factor_153,True,Profitability,-1,Coefficient of variation for dollar trading volume,Factor Details.xlsx (official),float64,0.998
+corr_1260d,factor_153,True,Seasonality,-1,Market correlation,Factor Details.xlsx (official),float64,0.979
+ivol_ff3_21d,factor_153,True,Low Risk,-1,Idiosyncratic volatility from the Fama-French 3-factor model,Factor Details.xlsx (official),float64,1.0
+iskew_ff3_21d,factor_153,True,Short-Term Reversal,-1,Idiosyncratic skewness from the Fama-French 3-factor model,Factor Details.xlsx (official),float64,1.0
+beta_21d,other_characteristic,False,,,"market beta, 21 days","naming convention (auto-parsed, verify)",float64,1.0
+ivol_capm_21d,factor_153,True,Low Risk,-1,Idiosyncratic volatility from the CAPM (21 days),Factor Details.xlsx (official),float64,1.0
+iskew_capm_21d,factor_153,True,Short-Term Reversal,-1,Idiosyncratic skewness from the CAPM,Factor Details.xlsx (official),float64,1.0
+coskew_21d,factor_153,True,Seasonality,-1,Coskewness,Factor Details.xlsx (official),float64,1.0
+betadown_252d,factor_153,True,Low Risk,-1,Downside beta,Factor Details.xlsx (official),float64,0.996
+prc_highprc_252d,factor_153,True,Momentum,1,Current price to high price over last year,Factor Details.xlsx (official),float64,0.996
+zero_trades_126d,factor_153,True,Low Risk,1,Number of zero trades with turnover as tiebreaker (6 months),Factor Details.xlsx (official),float64,0.998
+rvol_21d,factor_153,True,Low Risk,-1,Return volatility,Factor Details.xlsx (official),float64,1.0
+ami_126d,factor_153,True,Size,1,Amihud Measure,Factor Details.xlsx (official),float64,0.998
+turnover_126d,factor_153,True,Low Risk,-1,Share turnover,Factor Details.xlsx (official),float64,0.998
+turnover_var_126d,factor_153,True,Profitability,-1,Coefficient of variation for share turnover,Factor Details.xlsx (official),float64,0.998
+beta_dimson_21d,factor_153,True,Low Risk,-1,Dimson beta,Factor Details.xlsx (official),float64,1.0
+beta_252d,other_characteristic,False,,,"market beta, 252 days","naming convention (auto-parsed, verify)",float64,0.996
+ivol_capm_252d,factor_153,True,Low Risk,-1,Idiosyncratic volatility from the CAPM (252 days),Factor Details.xlsx (official),float64,0.996
+rmax5_21d,factor_153,True,Low Risk,-1,Highest 5 days of return,Factor Details.xlsx (official),float64,1.0
+rmax1_21d,factor_153,True,Low Risk,-1,Maximum daily return,Factor Details.xlsx (official),float64,1.0
+ivol_hxz4_21d,factor_153,True,Low Risk,-1,Idiosyncratic volatility from the q-factor model,Factor Details.xlsx (official),float64,1.0
+iskew_hxz4_21d,factor_153,True,Short-Term Reversal,-1,Idiosyncratic skewness from the q-factor model,Factor Details.xlsx (official),float64,1.0
+zero_trades_21d,factor_153,True,Low Risk,1,Number of zero trades with turnover as tiebreaker (1 month),Factor Details.xlsx (official),float64,1.0
+betabab_1260d,factor_153,True,Low Risk,-1,Frazzini-Pedersen market beta,Factor Details.xlsx (official),float64,0.979
+rmax5_rvol_21d,factor_153,True,Short-Term Reversal,-1,Highest 5 days of return scaled by volatility,Factor Details.xlsx (official),float64,0.996
+age,factor_153,True,Low Leverage,-1,Firm age,Factor Details.xlsx (official),float64,1.0
+qmj_prof,factor_153,True,Quality,1,Quality minus Junk: Profitability,Factor Details.xlsx (official),float64,1.0
+qmj_growth,factor_153,True,Quality,1,Quality minus Junk: Growth,Factor Details.xlsx (official),float64,0.981
+qmj_safety,factor_153,True,Quality,1,Quality minus Junk: Safety,Factor Details.xlsx (official),float64,1.0
+qmj,factor_153,True,Quality,1,Quality minus Junk: Composite,Factor Details.xlsx (official),float64,0.981
+me_lag1,other_characteristic,False,,,market equity lagged 1 month,"naming convention (auto-parsed, verify)",float64,1.0
