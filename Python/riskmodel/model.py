@@ -45,24 +45,28 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[2]
-RM_DIR = ROOT / "data" / "riskmodel"
+import sys
+from pathlib import Path
 
-ID_COLS = ["permno", "eom", "ticker", "ticker_cls", "me", "in_sp500", "sector", "tier", "n_bars"]
-BARS_PER_DAY = {"hourly": 7, "daily": 1}
-TRADING_DAYS = 252
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `riskmodel.common`
+sys.path.insert(0, str(Path(__file__).resolve().parent))      # resolves however this is run
+
+try:
+    from riskmodel.common import RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, BARS_PER_DAY, norm_ticker
+except ImportError:
+    from common import RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, BARS_PER_DAY, norm_ticker
+
+
 HALFLIFE_COV_DAYS = 10      # trading days. Swept against 21/42/63 by bias_test.py: 10 gives an
                             # overall bias statistic of 1.005 (inside the band) vs 1.031 at 63.
                             # Intraday volatility shifts regime in days, not months - a 63-day
                             # halflife visibly lagged 2020-22 (understated) and 2023-25 (overstated).
 HALFLIFE_SPEC_DAYS = 126
 MIN_SPEC_OBS = 60
-MAX_STALE_DAYS = 45
 MIN_HOUR_OBS = 100          # bars of a given hour needed before trusting its own scale
 MIN_EIGEN_RATIO = 1e-3      # floor on Sigma_f's eigenvalues as a share of its largest, so the
                             # optimizer gets a matrix it can invert (condition number <= 1/this)
 
-norm_ticker = lambda s: s.astype(str).str.upper().str.replace(r"[.\-/]", "", regex=True)
 
 
 # ------------------------------------------------------------------ loading (cached)
@@ -337,13 +341,67 @@ def specific_var(when, freq: str = "hourly", horizon_bars: float = 1.0, target_h
 
 
 # ------------------------------------------------------------------ convenience
-def total_risk(weights: pd.Series, when, freq: str = "hourly", horizon_bars: float = 1.0) -> dict:
-    """Annualized risk of a weight vector for the bar at `when`."""
+
+
+def forward_hours(when, n_bars: int, freq: str = "hourly") -> list[int]:
+    """Which bars the next `n_bars` fall in, starting after `when`.
+
+    From a 10:00 decision the next 7 bars are 11,12,13,14,15,16 today and 10:00 tomorrow -
+    exactly one trading day, which is the team's forecast horizon.
+    """
+    if freq == "daily":
+        return [-1] * n_bars
+    h0 = int(pd.Timestamp(when).hour)
+    i = TRADING_HOURS.index(h0) if h0 in TRADING_HOURS else -1
+    return [TRADING_HOURS[(i + 1 + k) % len(TRADING_HOURS)] for k in range(n_bars)]
+
+
+def cov_span(when, n_bars: int = 7, freq: str = "hourly", **kw) -> pd.DataFrame:
+    """Factor covariance over the next `n_bars`, for a position held that long.
+
+    Each bar has its own covariance (the 10:00 bar is ~2.6x the afternoon), so the horizon
+    covariance is the SUM of the bars actually spanned, not a sqrt-of-time scaling of one bar.
+    Scaling by sqrt(n) understates a one-day horizon by about 5% because it ignores that
+    variance is concentrated in the overnight bar. Factor returns are near-uncorrelated across
+    bars (|autocorrelation| < 0.06), so the cross-bar terms are dropped.
+
+    n_bars=1 is the holding period between hourly rebalances; n_bars=7 is one trading day,
+    the horizon the alpha models forecast over.
+    """
+    hours = forward_hours(when, n_bars, freq)
+    total = None
+    for h in hours:
+        S = cov(when, freq=freq, target_hour=None if h < 0 else h, **kw)
+        total = S if total is None else total + S
+    total.attrs.update(when=pd.Timestamp(when), n_bars=n_bars, hours=hours, freq=freq)
+    return total
+
+
+def specific_var_span(when, n_bars: int = 7, freq: str = "hourly", **kw) -> pd.Series:
+    """Specific variance over the next `n_bars`, summed bar by bar (see cov_span)."""
+    hours = forward_hours(when, n_bars, freq)
+    total = None
+    for h in hours:
+        D = specific_var(when, freq=freq, target_hour=None if h < 0 else h, **kw)
+        total = D if total is None else total + D
+    return total
+
+
+def total_risk(weights: pd.Series, when, freq: str = "hourly", horizon_bars: int = 1) -> dict:
+    """Annualized risk of a weight vector held for `horizon_bars` bars from `when`.
+
+    horizon_bars=1 is the hourly holding period; 7 is one trading day, the alpha's horizon.
+    For more than one bar the per-bar covariances are SUMMED over the bars actually spanned
+    (cov_span), never scaled by sqrt(n) - bars differ too much for that to be valid.
+    """
     B = exposures(when, freq=freq)
     w = weights.reindex(B.index).fillna(0.0).to_numpy()
     Bm = B[factor_names(freq)].to_numpy(float)
-    S = cov(when, freq=freq, horizon_bars=horizon_bars).to_numpy()
-    D = specific_var(when, freq=freq, horizon_bars=horizon_bars, index=B.index).to_numpy()
+    # always forward-looking: the risk of a position taken NOW is the risk of the bars it will
+    # be held through, never the bar just observed. cov_span handles n=1 as "the next bar".
+    n = int(horizon_bars)
+    S = cov_span(when, n, freq=freq).to_numpy()
+    D = specific_var_span(when, n, freq=freq, index=B.index).to_numpy()
     x = Bm.T @ w
     fac, spec = float(x @ S @ x), float((w ** 2) @ D)
     ann = np.sqrt(TRADING_DAYS * BARS_PER_DAY[freq] / horizon_bars)

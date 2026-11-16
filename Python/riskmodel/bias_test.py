@@ -42,13 +42,13 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from riskmodel import model  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[2]
-RM_DIR = ROOT / "data" / "riskmodel"
-RETURNS_PATH = ROOT / "data" / "returns" / "1h_bar.parquet"
-WARMUP = 252          # trading days of factor-return history before the first test
-MAX_ABS_RET = 0.5
+try:
+    from riskmodel.common import ROOT, RM_DIR, RETURNS_PATH, MAX_ABS_RET, norm_ticker
+except ImportError:
+    from common import ROOT, RM_DIR, RETURNS_PATH, MAX_ABS_RET, norm_ticker
 
-norm_ticker = lambda s: s.astype(str).str.upper().str.replace(r"[.\-/]", "", regex=True)
+WARMUP = 252          # trading days of factor-return history before the first test
+
 
 
 def returns_wide(freq: str = "hourly") -> pd.DataFrame:
@@ -98,6 +98,13 @@ def main():
     p.add_argument("--n-random", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--halflife", type=float, default=None, help="EWMA halflife in DAYS (default: model.py)")
+    p.add_argument("--horizon-bars", type=int, default=1,
+                   help="bars the position is held. 1 = the hourly holding period; 7 = one "
+                        "trading day, the horizon the alpha models forecast over. Test points "
+                        "must be at least this far apart (--every) or the windows overlap and "
+                        "the confidence band is invalid.")
+    p.add_argument("--save-z", action="store_true",
+                   help="also write the raw per-period z scores. Off by default: the summary CSV is what the report reads.")
     p.add_argument("--out", default=str(RM_DIR))
     a = p.parse_args()
     rng = np.random.default_rng(a.seed)
@@ -121,21 +128,29 @@ def main():
     raw["key"] = norm_ticker(raw["ticker"].fillna(""))
     rows = []
     for t in test_dates:
-        nxt = R.index[R.index > t]
-        if len(nxt) == 0:
+        fwd = R.index[R.index > t][:a.horizon_bars]
+        if len(fwd) < a.horizon_bars:
             continue
-        nxt = nxt[0]
+        nxt = fwd[0]
         # the forecast is for bar `nxt`, so its hour sets the scale; history stops at `t`
         th = None if a.freq == "daily" else int(pd.Timestamp(nxt).hour)
         try:
             B = model.exposures(t, freq=a.freq)
-            S = model.cov(t, freq=a.freq, target_hour=th, halflife_days=a.halflife).to_numpy()
-            D = model.specific_var(t, freq=a.freq, target_hour=th, index=B.index,
+            if a.horizon_bars == 1:
+                S = model.cov(t, freq=a.freq, target_hour=th, halflife_days=a.halflife).to_numpy()
+                D = model.specific_var(t, freq=a.freq, target_hour=th, index=B.index,
+                                       halflife_days=a.halflife).to_numpy()
+            else:   # position held several bars: sum each bar's own covariance
+                S = model.cov_span(t, a.horizon_bars, freq=a.freq,
                                    halflife_days=a.halflife).to_numpy()
+                D = model.specific_var_span(t, a.horizon_bars, freq=a.freq, index=B.index,
+                                            halflife_days=a.halflife).to_numpy()
         except ValueError:
             continue
 
-        r_next = R.loc[nxt].reindex(B.index)
+        # held for horizon_bars with no rebalancing -> the realised return is the sum of bars
+        r_next = (R.loc[fwd].sum(min_count=a.horizon_bars) if a.horizon_bars > 1
+                  else R.loc[nxt]).reindex(B.index)
         have = r_next.notna().to_numpy()
         if have.sum() < 50:
             continue
@@ -161,7 +176,8 @@ def main():
                          "realized": realized, "z": realized / sigma})
 
     z = pd.DataFrame(rows)
-    z.to_parquet(Path(a.out) / f"bias_test_z_{a.freq}.parquet")
+    if a.save_z:
+        z.to_parquet(Path(a.out) / f"bias_test_z_{a.freq}.parquet")
 
     def summarize(g):
         n = len(g)
@@ -182,7 +198,8 @@ def main():
         return "index/active"
     out["group"] = [grp(s) for s in out.index]
     out = out.sort_values(["group", "portfolio"])
-    tag = a.freq + (f"_hl{a.halflife:g}" if a.halflife else "")
+    tag = a.freq + (f"_h{a.horizon_bars}" if a.horizon_bars != 1 else "") \
+          + (f"_hl{a.halflife:g}" if a.halflife else "")
     out.to_csv(Path(a.out) / f"bias_test_{tag}.csv")
 
     pd.set_option("display.width", 200)

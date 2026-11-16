@@ -35,17 +35,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[2]
-RM_DIR = ROOT / "data" / "riskmodel"
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `riskmodel.common`
+sys.path.insert(0, str(Path(__file__).resolve().parent))      # resolves however this is run
+
+try:
+    from riskmodel.common import RM_DIR, RETURNS_PATH, ID_COLS, MAX_ABS_RET, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, norm_ticker
+except ImportError:
+    from common import RM_DIR, RETURNS_PATH, ID_COLS, MAX_ABS_RET, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, norm_ticker
+
 EXPOSURES_PATH = RM_DIR / "exposures.parquet"
-RETURNS_PATH = ROOT / "data" / "returns" / "1h_bar.parquet"
 
-ID_COLS = ["permno", "eom", "ticker", "ticker_cls", "me", "in_sp500", "sector"]
 MIN_SECTOR = 10        # sectors thinner than this on a given day are pooled into "Other"
-MAX_ABS_RET = 0.5      # drop a daily return beyond +-50% (ticker-reuse artifacts, see return_sanity_check)
-MAX_STALE_DAYS = 45    # exposures update monthly; refuse to reuse them for longer than this
 
-norm_ticker = lambda s: s.astype(str).str.upper().str.replace(r"[.\-/]", "", regex=True)
 
 
 def load_returns(freq: str = "daily", path: Path = RETURNS_PATH) -> pd.DataFrame:
@@ -189,8 +193,9 @@ def run_regressions(panel, styles, use_sectors, ridge, split_half=True, seed=0):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--freq", default="daily", choices=["daily", "hourly"],
-                   help="hourly estimates one cross-section per bar, giving residualized HOURLY "
-                        "returns for the alpha models to forecast")
+                   help="hourly estimates one cross-section per bar. These per-bar residuals are "
+                        "the primitive: alpha_target.py sums 7 of them to build the 1-DAY-ahead "
+                        "residual the alpha models actually forecast.")
     p.add_argument("--no-sectors", action="store_true")
     p.add_argument("--no-split-half", action="store_true",
                    help="skip the two half-sample fits used to remove estimation noise from Sigma_f")
@@ -200,6 +205,8 @@ def main():
                         "this, then re-estimate. Weakly identified factors carry mostly estimation "
                         "noise, which inflates Sigma_f and makes the model overstate the risk of "
                         "portfolios tilted on them (see bias_test.py). 0 disables the cut.")
+    p.add_argument("--diagnostics", action="store_true",
+                   help="also write per-bar t-stats and the per-bar regression summary. Off by default: they are ~4 MB of diagnostics nothing in the pipeline reads, and factor_summary_hourly.csv already carries the aggregate.")
     p.add_argument("--out", default=str(RM_DIR))
     a = p.parse_args()
     out_dir = Path(a.out)
@@ -237,31 +244,16 @@ def main():
 
     sfx = a.freq
     f.to_parquet(out_dir / f"factor_returns_{sfx}.parquet")
-    t.to_parquet(out_dir / f"factor_tstats_{sfx}.parquet")
     u.to_parquet(out_dir / f"residuals_{sfx}.parquet", compression="zstd")
-    d.to_csv(out_dir / f"regression_diagnostics_{sfx}.csv", index=False)
+    if a.diagnostics:
+        t.to_parquet(out_dir / f"factor_tstats_{sfx}.parquet")
+        d.to_csv(out_dir / f"regression_diagnostics_{sfx}.csv", index=False)
+        print("diagnostics written: per-bar t-stats, per-bar regression summary")
     if halves is not None:
         halves[0].to_parquet(out_dir / f"factor_returns_halfA_{sfx}.parquet")
         halves[1].to_parquet(out_dir / f"factor_returns_halfB_{sfx}.parquet")
         print(f"split-half estimates saved: {len(halves[0]):,} periods "
               f"(Cov(f_A, f_B) gives the noise-free factor covariance)")
-
-    # the alpha models forecast RESIDUAL returns: what is left of a stock's move once the
-    # market, its sector and the style factors are taken out. This is the column
-    # notebooks/forecast_analytics_demo.qmd expects as `residualized_return`.
-    tgt = u.rename(columns={"date": "target_date", "resid": "residualized_return"})
-    cols = ["target_date", "ticker", "residualized_return"]
-    if a.freq == "hourly":
-        cols.insert(2, "hour")
-    tgt = tgt[cols].copy()
-    tgt["residualized_return"] = tgt["residualized_return"].astype("float32")
-    tgt["ticker"] = tgt["ticker"].astype("category")
-    if "hour" in tgt:
-        tgt["hour"] = tgt["hour"].astype("int8")
-    tgt.to_parquet(out_dir / f"residual_returns_{sfx}.parquet",
-                   compression="zstd", compression_level=9)   # 60MB -> 34MB, fits git comfortably
-    print(f"\nalpha-model target written: {out_dir / f'residual_returns_{sfx}.parquet'} "
-          f"({len(tgt):,} rows, columns {cols})")
 
     ANN = 252 * 7 if a.freq == "hourly" else 252
     print(f"\n{len(f):,} {a.freq} regressions ({d['skipped'].sum()} skipped), "

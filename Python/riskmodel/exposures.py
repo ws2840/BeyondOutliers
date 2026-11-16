@@ -34,16 +34,14 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from market_data.global_factor_common import ALL_PATH, REDUCED_PATH, load_meta  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[2]
+try:
+    from riskmodel.common import ROOT, RM_DIR, INSTRUMENT_PATH, MEMBERSHIP_PATH, ID_COLS, GICS_SECTORS, norm_ticker
+except ImportError:
+    from common import ROOT, RM_DIR, INSTRUMENT_PATH, MEMBERSHIP_PATH, ID_COLS, GICS_SECTORS, norm_ticker
+
 OUT_PATH = ROOT / "data" / "riskmodel" / "exposures.parquet"
-INSTRUMENT_PATH = ROOT / "data" / "universe" / "sp500_instrument.csv"
-MEMBERSHIP_PATH = ROOT / "data" / "universe" / "sp500_universe_early_end.csv"
 
-GICS_SECTORS = {10: "Energy", 15: "Materials", 20: "Industrials", 25: "Consumer Discretionary",
-                30: "Consumer Staples", 35: "Health Care", 40: "Financials", 45: "Information Technology",
-                50: "Communication Services", 55: "Utilities", 60: "Real Estate"}
 
-norm_ticker = lambda s: s.astype(str).str.upper().str.replace(r"[.\-/]", "", regex=True)
 
 
 def zscore_month(X: pd.DataFrame, cap: pd.Series) -> pd.DataFrame:

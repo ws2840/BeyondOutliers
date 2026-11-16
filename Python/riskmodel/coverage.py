@@ -51,17 +51,15 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from market_data.universe import get_universe  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[2]
-RM_DIR = ROOT / "data" / "riskmodel"
-RETURNS_PATH = ROOT / "data" / "returns" / "1h_bar.parquet"
-INSTRUMENT_PATH = ROOT / "data" / "universe" / "sp500_instrument.csv"
+try:
+    from riskmodel.common import ROOT, RM_DIR, RETURNS_PATH, INSTRUMENT_PATH, ID_COLS, MAX_ABS_RET, TRADING_HOURS, norm_ticker
+except ImportError:
+    from common import ROOT, RM_DIR, RETURNS_PATH, INSTRUMENT_PATH, ID_COLS, MAX_ABS_RET, TRADING_HOURS, norm_ticker
 
-ID_COLS = ["permno", "eom", "ticker", "ticker_cls", "me", "in_sp500", "sector"]
-BARS_PER_DAY = 7
+
+BARS_PER_DAY = len(TRADING_HOURS)
 MIN_BARS = 60 * BARS_PER_DAY      # least history a tier-2 beta may be built from
-MAX_ABS_RET = 0.5
 
-norm_ticker = lambda s: pd.Series(s).astype(str).str.upper().str.replace(r"[.\-/]", "", regex=True)
 
 
 def hourly_returns() -> pd.DataFrame:
