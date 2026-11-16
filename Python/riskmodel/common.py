@@ -16,6 +16,7 @@ IDENTITY. Every table is joined on `key`, the normalized ticker the book trades 
 (Databento BRK.B -> BRKB). exposures.py resolves each JKP row to that key once, so no later
 step has to guess between CRSP's ticker (BRK) and ticker + share class (BRKB).
 """
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -32,9 +33,12 @@ TICKER_MAP_PATH = DATA_DIR / "jkp" / "permno_ticker.csv"   # CRSP stocknames: pe
 
 # Non-factor columns of exposures.parquet / exposures_covered.parquet.
 ID_COLS = ["permno", "eom", "ticker", "ticker_cls", "key", "me", "in_sp500", "sector",
-           "sector_model", "tier", "n_bars"]
+           "sector_src", "sector_model", "tier", "n_bars"]
 
 TRADING_HOURS = [10, 11, 12, 13, 14, 15, 16]        # bar ENDS; the 11:00 bar covers 10:00-11:00
+DECISION_HOURS = [10, 11, 12, 13, 14, 15]           # the book trades at these times only: not in
+                                                    # 09:30-10:00, not in 15:00-16:00. A position
+                                                    # taken at 15:00 is held to 10:00 the next day.
 BARS_PER_DAY = {"hourly": len(TRADING_HOURS), "daily": 1}
 TRADING_DAYS = 252
 BARS_PER_YEAR = TRADING_DAYS * len(TRADING_HOURS)
@@ -60,6 +64,20 @@ def norm_ticker(s) -> pd.Series:
     All become BRKB.
     """
     return pd.Series(s).astype(str).str.upper().str.replace(r"[.\-/]", "", regex=True)
+
+
+@lru_cache(maxsize=1)
+def _membership() -> pd.DataFrame:
+    m = pd.read_csv(MEMBERSHIP_PATH, parse_dates=["start_date", "end_date"])
+    m["key"] = norm_ticker(m["ticker"]).to_numpy()
+    return m
+
+
+def members_on(date) -> set:
+    """Normalized tickers that are index members ON `date` (point in time, from the membership file)."""
+    d = pd.Timestamp(date).normalize()
+    m = _membership()
+    return set(m.loc[(m["start_date"] <= d) & (m["end_date"].isna() | (m["end_date"] > d)), "key"]) - {""}
 
 
 def style_columns(df) -> list[str]:
@@ -104,8 +122,10 @@ def load_hourly_returns(path: Path = RETURNS_PATH, verbose: bool = True) -> pd.D
     Three things are removed, each for a stated reason:
       - the first bar after a ticker changes hands (ticker_reuse_dates), which is not a return;
       - thin bars: on a half day the market closes at 13:00 but the file still carries
-        14:00-16:00 bars built from a few after-hours prints. Their returns are compounded
-        into the stock's next real bar, so no price move is lost;
+        14:00-16:00 bars built from a few after-hours prints. A bar is thin when it holds
+        fewer than THIN_BAR_FRAC of the stocks in the fullest bar SO FAR that day (so the
+        call never depends on later bars). Thin-bar returns are compounded into the stock's
+        next real bar, so no price move is lost;
       - |ret| > MAX_ABS_RET, a guard against data errors.
     """
     r = pd.read_parquet(path)
@@ -132,15 +152,13 @@ def load_hourly_returns(path: Path = RETURNS_PATH, verbose: bool = True) -> pd.D
         out = out[~drop]
 
     # 2. thin bars: fold their returns into the stock's next full bar
-    n_bar = out.groupby("period")["key"].transform("size")
-    day_max = n_bar.groupby(out["date"]).transform("max")
-    thin = (n_bar < THIN_BAR_FRAC * day_max).to_numpy()
-    n_thin_bars = int(out.loc[thin, "period"].nunique())
-    if thin.any():
+    per_bar = out.groupby("period").size()
+    so_far = per_bar.groupby(per_bar.index.normalize()).cummax()
+    thin_bars = per_bar.index[(per_bar < THIN_BAR_FRAC * so_far).to_numpy()]
+    n_thin_bars = len(thin_bars)
+    if n_thin_bars:
         out = out.sort_values(["key", "period"], kind="stable").reset_index(drop=True)
-        n_bar = out.groupby("period")["key"].transform("size")
-        day_max = n_bar.groupby(out["date"]).transform("max")
-        kept = (n_bar >= THIN_BAR_FRAC * day_max).to_numpy()
+        kept = ~out["period"].isin(thin_bars).to_numpy()
         # each row belongs to the block that ENDS at the stock's next kept bar
         block = pd.Series(kept[::-1].astype(int)).groupby(out["key"].to_numpy()[::-1]).cumsum().to_numpy()[::-1]
         logret = np.log1p(out["ret"].clip(lower=-0.999999))

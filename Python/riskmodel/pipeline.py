@@ -19,6 +19,9 @@ notebooks/risk_model_method.qmd walks through the method.
     4 alpha_target    residuals_*                   -> alpha_target_1d.parquet
     5 bias_test       (validation, optional)        -> bias_test_hourly.csv
 
+A separate check, run by hand after a build:
+    bias_test.py --holding    risk of the book's real holding periods (overnight from 15:00)
+
 Prerequisites, produced by Python/market_data/ (see data/jkp/README.md):
     data/jkp/all.parquet          global_factor_download.py   (needs WRDS)
     data/jkp/reduced.parquet      global_factor_reduce.py     (for the permno->ticker map)

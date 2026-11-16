@@ -61,9 +61,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `riskmodel.co
 sys.path.insert(0, str(Path(__file__).resolve().parent))      # resolves however this is run
 
 try:
-    from riskmodel.common import RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, BARS_PER_DAY, norm_ticker
+    from riskmodel.common import (RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, DECISION_HOURS,
+                                  BARS_PER_DAY, norm_ticker, members_on)
 except ImportError:
-    from common import RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, BARS_PER_DAY, norm_ticker
+    from common import (RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, DECISION_HOURS,
+                        BARS_PER_DAY, norm_ticker, members_on)
 
 
 HALFLIFE_COV_DAYS = 10      # trading days. Checked on the training years only
@@ -73,6 +75,8 @@ HALFLIFE_COV_DAYS = 10      # trading days. Checked on the training years only
                             # them, so 10 is kept; it is not a tuned optimum.
 HALFLIFE_SPEC_DAYS = 126    # trading days. Same check with --spec-halflife: 42 / 63 / 126 / 252 give
                             # 0.050 / 0.052 / 0.056 / 0.060 - shorter is marginally better, within noise.
+                            # (Both checks predate the point-in-time membership / sector changes and
+                            # have not been re-run since.)
 MIN_SPEC_OBS = 60
 MIN_HOUR_OBS = 100          # bars of a given hour needed before trusting its own scale
 MIN_EIGEN_RATIO = 1e-3      # floor on Sigma_f's eigenvalues as a share of its largest, so the
@@ -186,7 +190,12 @@ def _hour_of(when, freq: str) -> int:
 
 # ------------------------------------------------------------------ B
 def exposures(date, sp500_only: bool = True, freq: str = "hourly") -> pd.DataFrame:
-    """Exposure matrix for `date`: stocks (by key) x factors, matching the columns of cov()."""
+    """Exposure matrix for `date`: stocks (by key) x factors, matching the columns of cov().
+
+    With sp500_only (default) the rows are the index members ON `date`, point in time: a stock
+    that joins later in the month is not served before its first day, and one that has left
+    is dropped the day it leaves, even though both have a row at the month-end.
+    """
     date = pd.Timestamp(date).normalize()
     e = _exposures()
     eoms = e["eom"].unique()
@@ -200,7 +209,7 @@ def exposures(date, sp500_only: bool = True, freq: str = "hourly") -> pd.DataFra
 
     g = e[e["eom"] == eom]
     if sp500_only:
-        g = g[g["in_sp500"]]
+        g = g[g["in_sp500"] & g["key"].isin(members_on(date))]
     g = g[g["key"] != ""].drop_duplicates("key", keep="first").set_index("key")
 
     names, styles = factor_names(freq), style_columns()
@@ -420,6 +429,23 @@ def forward_hours(when, n_bars: int, freq: str = "hourly") -> list[int]:
     h0 = int(pd.Timestamp(when).hour)
     i = TRADING_HOURS.index(h0) if h0 in TRADING_HOURS else -1
     return [TRADING_HOURS[(i + 1 + k) % len(TRADING_HOURS)] for k in range(n_bars)]
+
+
+def holding_bars(when, freq: str = "hourly") -> int:
+    """Bars a position taken at `when` is held before the book can trade again.
+
+    The book trades at DECISION_HOURS only (10:00 ... 15:00): not in the first half hour, not
+    in the last hour. So a position taken at 10:00-14:00 is held for 1 bar, and one taken at
+    15:00 is held for 2 - the 16:00 bar and the next day's 10:00 bar, which carries the
+    overnight move. Use it as n_bars in cov_span() / specific_var_span() for the risk of the
+    holding period.
+    """
+    if freq == "daily":
+        return 1
+    n = 1
+    while forward_hours(when, n, freq)[-1] not in DECISION_HOURS:
+        n += 1
+    return n
 
 
 def cov_span(when, n_bars: int = 7, freq: str = "hourly", **kw) -> pd.DataFrame:
