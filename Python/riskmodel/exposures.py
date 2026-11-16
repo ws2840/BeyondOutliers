@@ -10,19 +10,35 @@ set stays well conditioned and interpretable. This is the descriptor -> style-fa
 aggregation used by commercial risk models (Barra, Axioma).
 
 Per month-end, for each of the 153 characteristics:
-    winsorize at +-3 sd  ->  cap-weighted z-score (mean 0, sd 1)
-Then per cluster: average the z-scores a stock actually has (missing ones are skipped,
-not treated as 0), and re-z-score the composite.
+    winsorize at +-3 sd  ->  cap-weighted z-score (mean 0, sd 1)  ->  x JKP `direction`
+Then per cluster: average the signed z-scores a stock actually has (missing ones are
+skipped, not treated as 0), and re-z-score the composite.
 
-GICS sector is point-in-time from JKP `gics` where available (78.6% of S&P 500 rows),
-filled by ticker from data/universe/sp500_instrument.csv (-> 98.1%), else "Other".
+DIRECTION. JKP's clusters group characteristics whose SIGNED long-short returns move
+together, and most clusters mix signs: Size holds market_equity (-1) next to ami_126d (+1),
+Value holds 14 positive and 4 negative. Averaging raw z-scores lets those cancel. Each
+z-score is therefore multiplied by its `direction` from factor_meta.csv first, so a high
+composite always means "more of what the cluster is named after".
+
+IDENTITY. Each row is resolved to `key`, the normalized ticker of the S&P 500 member it is
+(BRK + class B -> BRKB), which is what returns, residuals and the optimizer's weights are
+keyed on. Where two share classes of one company both match a member (LEN / LEN.B), the
+larger one is kept.
+
+SECTORS. `sector` is the GICS sector: point-in-time from JKP `gics` where available, filled
+by ticker from data/universe/sp500_instrument.csv, else "Other". `sector_model` is the
+sector FACTOR the stock loads on: its own sector if at least MIN_SECTOR estimation stocks
+share it that month, otherwise the pooled "Other" factor, otherwise none (""). Deciding this
+once per month-end, here, is what keeps the regression (factor_returns.py) and the served
+exposures (model.py) on the same definition.
 
 Output: data/riskmodel/exposures.parquet
-    permno, eom, ticker, me, in_sp500, sector, <13 cluster composites>
+    permno, eom, ticker, ticker_cls, key, me, in_sp500, sector, sector_model,
+    <13 cluster composites>
 
 Run (from repo root):
     python Python/riskmodel/exposures.py
-    python Python/riskmodel/exposures.py --sp500-only
+    python Python/riskmodel/exposures.py --universe all
 """
 import argparse
 import sys
@@ -35,13 +51,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from market_data.global_factor_common import ALL_PATH, REDUCED_PATH, load_meta  # noqa: E402
 
 try:
-    from riskmodel.common import ROOT, RM_DIR, INSTRUMENT_PATH, MEMBERSHIP_PATH, ID_COLS, GICS_SECTORS, norm_ticker
+    from riskmodel.common import ROOT, INSTRUMENT_PATH, MEMBERSHIP_PATH, GICS_SECTORS, MIN_SECTOR, norm_ticker
 except ImportError:
-    from common import ROOT, RM_DIR, INSTRUMENT_PATH, MEMBERSHIP_PATH, ID_COLS, GICS_SECTORS, norm_ticker
+    from common import ROOT, INSTRUMENT_PATH, MEMBERSHIP_PATH, GICS_SECTORS, MIN_SECTOR, norm_ticker
 
 OUT_PATH = ROOT / "data" / "riskmodel" / "exposures.parquet"
-
-
 
 
 def zscore_month(X: pd.DataFrame, cap: pd.Series) -> pd.DataFrame:
@@ -53,16 +67,19 @@ def zscore_month(X: pd.DataFrame, cap: pd.Series) -> pd.DataFrame:
     return (X - wmu) / X.std().replace(0, np.nan)
 
 
-def cluster_composites(panel: pd.DataFrame, clusters: dict[str, list[str]]) -> pd.DataFrame:
-    """One composite exposure per cluster per month: mean of the z-scores present, re-z-scored."""
+def cluster_composites(panel: pd.DataFrame, clusters: dict[str, list[str]],
+                       direction: pd.Series) -> pd.DataFrame:
+    """One composite exposure per cluster per month: mean of the signed z-scores present, re-z-scored."""
+    cols = [c for members in clusters.values() for c in members]
+    sign = direction.reindex(cols).astype(float)
     out = []
     for eom, g in panel.groupby("eom", sort=True):
         cap = g["me"].astype(float)
-        Z = zscore_month(g[[c for cols in clusters.values() for c in cols]].astype(float), cap)
+        Z = zscore_month(g[cols].astype(float), cap) * sign      # orient every characteristic
         comp = pd.DataFrame(index=g.index)
-        for name, cols in clusters.items():
-            comp[name] = Z[cols].mean(axis=1, skipna=True)   # skip missing, don't zero-fill
-        comp = zscore_month(comp, cap).fillna(0.0)           # re-standardize, then missing -> average stock
+        for name, members in clusters.items():
+            comp[name] = Z[members].mean(axis=1, skipna=True)    # skip missing, don't zero-fill
+        comp = zscore_month(comp, cap).fillna(0.0)               # re-standardize, then missing -> average stock
         comp.insert(0, "eom", eom)
         out.append(comp)
     return pd.concat(out)
@@ -74,26 +91,44 @@ def attach_sector(df: pd.DataFrame) -> pd.Series:
     if INSTRUMENT_PATH.exists():
         inst = pd.read_csv(INSTRUMENT_PATH)
         imap = dict(zip(norm_ticker(inst["Symbol"]), inst["GICS Sector"]))
-        for col in ("ticker", "ticker_cls"):
+        for col in ("key", "ticker_cls", "ticker"):
             if col in df.columns:
-                sector = sector.fillna(norm_ticker(df[col].fillna("")).map(imap))
+                sector = sector.fillna(norm_ticker(df[col].fillna("")).map(imap).set_axis(df.index))
     return sector.fillna("Other")
 
 
-def sp500_flag(df: pd.DataFrame) -> pd.Series:
-    """Point-in-time S&P 500 membership by ticker at eom."""
+def sp500_key(df: pd.DataFrame) -> pd.Series:
+    """The S&P 500 member each row is at eom, as a normalized ticker; "" if it is not one.
+
+    A row is tried under ticker + share class first (BRK + B -> BRKB), then under the bare
+    ticker, so a class-specific listing wins over the bare ticker.
+    """
+    out = pd.Series("", index=df.index, dtype=object)
     if not MEMBERSHIP_PATH.exists() or "ticker" not in df.columns:
-        return pd.Series(False, index=df.index)
+        return out
     m = pd.read_csv(MEMBERSHIP_PATH, parse_dates=["start_date", "end_date"])
     m["key"] = norm_ticker(m["ticker"])
-    keys = [norm_ticker(df[c].fillna("")) for c in ("ticker", "ticker_cls") if c in df.columns]
-    x = pd.concat([pd.DataFrame({"key": k, "eom": df["eom"].values, "row": np.arange(len(df))})
-                   for k in keys]).drop_duplicates()
+    cand = [pd.DataFrame({"key": norm_ticker(df[c].fillna("")).to_numpy(), "eom": df["eom"].to_numpy(),
+                          "row": np.arange(len(df)), "prio": p})
+            for p, c in enumerate(("ticker_cls", "ticker")) if c in df.columns]
+    x = pd.concat(cand)
+    x = x[x["key"] != ""]
     j = x.merge(m[["key", "start_date", "end_date"]], on="key", how="inner")
-    hit = j[(j["start_date"] <= j["eom"]) & (j["end_date"].isna() | (j["end_date"] > j["eom"]))]["row"].unique()
-    out = np.zeros(len(df), dtype=bool)
-    out[hit] = True
-    return pd.Series(out, index=df.index)
+    j = j[(j["start_date"] <= j["eom"]) & (j["end_date"].isna() | (j["end_date"] > j["eom"]))]
+    j = j.sort_values(["row", "prio"]).drop_duplicates("row", keep="first")
+    out.iloc[j["row"].to_numpy()] = j["key"].to_numpy()
+    return out
+
+
+def model_sector(df: pd.DataFrame) -> pd.Series:
+    """Which sector factor each row loads on (see SECTORS in the module docstring)."""
+    est = df[df["in_sp500"]]
+    n = est.groupby(["eom", "sector"]).size().rename("n").reset_index()
+    own = df[["eom", "sector"]].merge(n, on=["eom", "sector"], how="left")["n"].fillna(0).to_numpy() >= MIN_SECTOR
+    pooled = pd.Series(np.where(own, df["sector"], "Other"), index=df.index)
+    n_other = pooled[df["in_sp500"]].groupby(df.loc[df["in_sp500"], "eom"]).apply(lambda s: (s == "Other").sum())
+    other_ok = df["eom"].map(n_other).fillna(0).to_numpy() >= MIN_SECTOR
+    return pooled.where((pooled != "Other") | other_ok, "")
 
 
 def main():
@@ -108,9 +143,11 @@ def main():
 
     meta = load_meta()
     clusters = {c: sorted(g["factor"]) for c, g in meta.groupby("cluster")}
+    direction = meta.set_index("factor")["direction"]
     print(f"{len(meta)} characteristics -> {len(clusters)} cluster composites")
     for c, cols in sorted(clusters.items(), key=lambda kv: -len(kv[1])):
-        print(f"  {c:22s} {len(cols):3d}")
+        d = direction.reindex(cols)
+        print(f"  {c:22s} {len(cols):3d}   ({int((d > 0).sum())} positive, {int((d < 0).sum())} negative direction)")
 
     id_cols = ["permno", "eom", "me", "gics", "ff49"]      # all.parquet has no ticker column
     src = pd.read_parquet(ALL_PATH, columns=list(dict.fromkeys(id_cols + meta["factor"].tolist())))
@@ -128,17 +165,34 @@ def main():
     print(f"\npanel: {len(src):,} rows, {src['eom'].nunique()} month-ends, "
           f"{src['eom'].min().date()} -> {src['eom'].max().date()}")
 
-    src["in_sp500"] = sp500_flag(src)
+    src["key"] = sp500_key(src)
+    src["in_sp500"] = src["key"] != ""
+    # two share classes of one company can both match the same member: keep the larger
+    dup = src["in_sp500"] & src.duplicated(["eom", "key"], keep=False)
+    if dup.any():
+        best = src[dup].sort_values("me", ascending=False).drop_duplicates(["eom", "key"]).index
+        lose = src.index[dup].difference(best)
+        print(f"{len(lose):,} rows are a second share class of an index member "
+              f"({', '.join(sorted(src.loc[lose, 'key'].unique()))}); the larger class is kept")
+        src.loc[lose, ["key", "in_sp500"]] = ["", False]
+    not_member = ~src["in_sp500"]
+    src.loc[not_member, "key"] = norm_ticker(src.loc[not_member, "ticker_cls"].fillna("")).to_numpy()
+
     src["sector"] = attach_sector(src)
     if a.universe == "sp500":
         src = src[src["in_sp500"]].reset_index(drop=True)
         print(f"standardizing within the S&P 500: {len(src):,} rows, "
               f"{int(src.groupby('eom').size().median())} stocks per month")
+    src["sector_model"] = model_sector(src)
+    last = src[src["in_sp500"] & (src["eom"] == src["eom"].max())]
+    print(f"sector factors at {src['eom'].max().date()}: "
+          + ", ".join(f"{s or '(none)'} {n}" for s, n in last["sector_model"].value_counts().sort_index().items()))
 
-    comp = cluster_composites(src, clusters)
+    comp = cluster_composites(src, clusters, direction)
     out = pd.DataFrame({"permno": src["permno"], "eom": src["eom"], "ticker": src["ticker"],
-                        "ticker_cls": src["ticker_cls"], "me": src["me"].astype(float),
-                        "in_sp500": src["in_sp500"], "sector": src["sector"]})
+                        "ticker_cls": src["ticker_cls"], "key": src["key"], "me": src["me"].astype(float),
+                        "in_sp500": src["in_sp500"], "sector": src["sector"],
+                        "sector_model": src["sector_model"]})
     out = pd.concat([out, comp.drop(columns="eom")], axis=1)
 
     path = Path(a.out)

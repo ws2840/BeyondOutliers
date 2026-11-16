@@ -10,9 +10,16 @@ Three functions are the whole public interface:
     cov(when)            -> DataFrame, factors x factors     (Sigma_f, for that bar)
     specific_var(when)   -> Series, stocks                   (D,       for that bar)
 
-FREQUENCY. The book trades every hour 10:00-15:00, and the alpha models forecast each
-hourly bar, so the model is estimated per BAR. B stays monthly because the JKP
-characteristics are monthly data - sales growth does not change between 10:00 and 11:00.
+Stocks are indexed by `key`, the normalized ticker the book trades under (BRK.B -> BRKB;
+common.norm_ticker). Weight vectors passed to total_risk() must use the same index.
+
+FREQUENCY. The book trades every hour, and the alpha models forecast from every hourly bar,
+so the model is estimated per BAR. B stays monthly because the JKP characteristics are
+monthly data - sales growth does not change between 10:00 and 11:00.
+
+FACTORS. market (every stock 1) + one factor per sector + the 13 style composites. A stock's
+sector factor is its `sector_model` from exposures.py / coverage.py - exactly the dummy it
+carried when the factor returns were estimated, so B and Sigma_f describe the same factors.
 
 HOUR OF DAY. Bars are not interchangeable: the 10:00 bar carries the overnight move and
 its factor returns are ~2.6x as volatile as the afternoon's, while the 16:00 bar picks up
@@ -31,22 +38,24 @@ rescaled by that hour's residual scale.
 NO LOOK-AHEAD. Exposures come from the last month-end strictly before the date; the scales,
 C and d all use only bars up to and including `when`. Safe to call inside a backtest loop.
 
-Inputs : data/riskmodel/{exposures, factor_returns_<freq>, residuals_<freq>}.parquet
-         built by exposures.py then factor_returns.py --freq hourly
+SPEED. Everything that does not depend on the bar being forecast is computed once per `when`
+and cached, so cov_span() / specific_var_span() over 7 bars cost one pass over history, not 7.
+
+Inputs : data/riskmodel/{exposures_covered, factor_returns_<freq>, residuals_<freq>}.parquet
+         and the coverage.py additions (residuals_covered, factor_returns_stage2), built by
+         pipeline.py
 
 Run (from repo root) for a self-test:
     python Python/riskmodel/model.py
     python Python/riskmodel/model.py --when "2024-06-28 10:00" --freq hourly
 """
 import argparse
+import sys
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-import sys
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `riskmodel.common`
 sys.path.insert(0, str(Path(__file__).resolve().parent))      # resolves however this is run
@@ -57,16 +66,16 @@ except ImportError:
     from common import RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, BARS_PER_DAY, norm_ticker
 
 
-HALFLIFE_COV_DAYS = 10      # trading days. Swept against 21/42/63 by bias_test.py: 10 gives an
-                            # overall bias statistic of 1.005 (inside the band) vs 1.031 at 63.
-                            # Intraday volatility shifts regime in days, not months - a 63-day
-                            # halflife visibly lagged 2020-22 (understated) and 2023-25 (overstated).
-HALFLIFE_SPEC_DAYS = 126
+HALFLIFE_COV_DAYS = 10      # trading days. Chosen by sweeping 10/21/42/63 through bias_test.py.
+                            # NOTE: that sweep ran on the whole sample, hidden test years included,
+                            # and before the regression was corrected. Re-tune with
+                            # `bias_test.py --end <last training day> --halflife N` before relying on it.
+HALFLIFE_SPEC_DAYS = 126    # trading days
 MIN_SPEC_OBS = 60
 MIN_HOUR_OBS = 100          # bars of a given hour needed before trusting its own scale
 MIN_EIGEN_RATIO = 1e-3      # floor on Sigma_f's eigenvalues as a share of its largest, so the
                             # optimizer gets a matrix it can invert (condition number <= 1/this)
-
+CALENDAR_DAYS_PER_YEAR = 365.25
 
 
 # ------------------------------------------------------------------ loading (cached)
@@ -78,28 +87,43 @@ def _exposures() -> pd.DataFrame:
     covered = RM_DIR / "exposures_covered.parquet"
     e = pd.read_parquet(covered if covered.exists() else RM_DIR / "exposures.parquet")
     e["eom"] = pd.to_datetime(e["eom"])
-    e["key"] = norm_ticker(e["ticker"].fillna(""))
+    if "key" not in e.columns or "sector_model" not in e.columns:
+        raise ValueError("exposures file predates the `key` / `sector_model` columns; "
+                         "rebuild with `python Python/riskmodel/pipeline.py`")
+    e["key"] = e["key"].fillna("")
     if "tier" not in e.columns:
         e["tier"] = 1
     return e
 
 
+def _with_stage2(f: pd.DataFrame, path: Path) -> pd.DataFrame:
+    """Add coverage.py's second-stage sector factors to the regression's factor returns."""
+    f = f.sort_index()
+    f.index = pd.DatetimeIndex(f.index)
+    if path.exists():
+        s2 = pd.read_parquet(path)
+        s2.index = pd.DatetimeIndex(s2.index)
+        for c in s2.columns:
+            s = s2[c].reindex(f.index)
+            f[c] = f[c].combine_first(s) if c in f.columns else s
+    return f
+
+
 @lru_cache(maxsize=4)
 def _factor_returns(freq: str) -> pd.DataFrame:
-    f = pd.read_parquet(RM_DIR / f"factor_returns_{freq}.parquet").sort_index()
-    f.index = pd.DatetimeIndex(f.index)
-    return f.fillna(0.0)        # a sector too thin to estimate that bar earned nothing
+    f = _with_stage2(pd.read_parquet(RM_DIR / f"factor_returns_{freq}.parquet"),
+                     RM_DIR / f"factor_returns_stage2_{freq}.parquet")
+    return f.fillna(0.0)        # a sector with no factor that bar earned nothing
 
 
 @lru_cache(maxsize=4)
 def _half_returns(freq: str):
     """The two half-sample factor return estimates, or None if they were not built."""
-    a = RM_DIR / f"factor_returns_halfA_{freq}.parquet"
-    b = RM_DIR / f"factor_returns_halfB_{freq}.parquet"
-    if not (a.exists() and b.exists()):
+    paths = [RM_DIR / f"factor_returns_half{h}_{freq}.parquet" for h in "AB"]
+    if not all(q.exists() for q in paths):
         return None
-    fa, fb = pd.read_parquet(a).sort_index(), pd.read_parquet(b).sort_index()
-    fa.index, fb.index = pd.DatetimeIndex(fa.index), pd.DatetimeIndex(fb.index)
+    fa, fb = (_with_stage2(pd.read_parquet(q), RM_DIR / f"factor_returns_stage2_half{h}_{freq}.parquet")
+              for h, q in zip("AB", paths))
     common = fa.index.intersection(fb.index)
     return fa.loc[common].fillna(0.0), fb.loc[common].fillna(0.0)
 
@@ -128,12 +152,25 @@ def _residuals(freq: str) -> pd.DataFrame:
     if extra.exists():
         u = pd.concat([u, pd.read_parquet(extra)], ignore_index=True)
     u["date"] = pd.to_datetime(u["date"])
-    u["key"] = norm_ticker(u["ticker"].fillna("")) if "ticker" in u.columns else ""
+    u["key"] = norm_ticker(u["ticker"].fillna("")).to_numpy() if "ticker" in u.columns else ""
     return u
 
 
+@lru_cache(maxsize=4)
+def _residual_arrays(freq: str) -> dict:
+    """Residuals as time-sorted arrays, so "history up to `when`" is a slice, not a 6M-row filter."""
+    u = _residuals(freq)
+    stamp = u["date"] if freq == "daily" else u["date"] + pd.to_timedelta(u["hour"], unit="h")
+    stamp = stamp.to_numpy().astype("datetime64[ns]").astype("int64")
+    order = np.argsort(stamp, kind="stable")
+    kcode, keys = pd.factorize(u["key"].to_numpy()[order])
+    hcode, hours = pd.factorize(u["hour"].to_numpy()[order], sort=True)
+    return {"stamp": stamp[order], "kcode": kcode, "keys": pd.Index(keys), "hcode": hcode,
+            "hours": np.asarray(hours), "resid": u["resid"].to_numpy(float)[order]}
+
+
 def style_columns() -> list[str]:
-    return [c for c in _exposures().columns if c not in ID_COLS + ["key"]]
+    return [c for c in _exposures().columns if c not in ID_COLS]
 
 
 def factor_names(freq: str = "hourly") -> list[str]:
@@ -147,7 +184,7 @@ def _hour_of(when, freq: str) -> int:
 
 # ------------------------------------------------------------------ B
 def exposures(date, sp500_only: bool = True, freq: str = "hourly") -> pd.DataFrame:
-    """Exposure matrix for `date`: stocks x factors, matching the columns of cov()."""
+    """Exposure matrix for `date`: stocks (by key) x factors, matching the columns of cov()."""
     date = pd.Timestamp(date).normalize()
     e = _exposures()
     eoms = e["eom"].unique()
@@ -171,7 +208,7 @@ def exposures(date, sp500_only: bool = True, freq: str = "hourly") -> pd.DataFra
         if s in names:
             B[s] = g[s].astype(float)
     for sec in [n for n in names if n not in styles and n != "market"]:
-        B[sec] = (g["sector"] == sec).astype(float)
+        B[sec] = (g["sector_model"] == sec).astype(float)
     B.attrs.update(eom=eom, date=date, freq=freq)
     B.insert(0, "permno", g["permno"].to_numpy())
     B.insert(1, "ticker", g["ticker"].to_numpy())
@@ -219,6 +256,61 @@ def hour_scales(hist: pd.DataFrame, freq: str) -> pd.DataFrame:
     return s.replace(0, np.nan).fillna(pooled)
 
 
+def _standardize(x: pd.DataFrame, sd: pd.DataFrame) -> np.ndarray:
+    """x / sd[hour]. A factor with no history yet (sd 0) standardizes to 0 instead of 0/0."""
+    scale = sd.reindex(x.index.hour).to_numpy(float)
+    return x.to_numpy(float) / np.where(scale > 0, scale, 1.0)
+
+
+@lru_cache(maxsize=32)
+def _cov_core(when: pd.Timestamp, freq: str, halflife: float, hour_scaling: bool,
+              eiv_correct: bool, shrink: bool, min_obs: int):
+    """Everything in cov() that does not depend on the hour being forecast.
+
+    Returns (C, sd, columns, n_obs, shrinkage, eiv). With hour scaling, C is the covariance of
+    the standardized factor returns and sd[h] the per-hour scales; without, C is Sigma_f itself
+    and sd is None. Cached: the returned arrays must not be modified.
+    """
+    f = _factor_returns(freq)
+    hist = f[f.index <= when]
+    if len(hist) < min_obs:
+        raise ValueError(f"only {len(hist)} periods of factor returns by {when}; need {min_obs}")
+    cols = hist.columns
+    scaled = hour_scaling and freq != "daily"
+    shrinkage = 0.0
+
+    halves = _half_returns(freq) if eiv_correct else None
+    if halves is not None and not set(cols) <= set(halves[0].columns):
+        halves = None                                 # half-sample files do not carry every factor
+    if halves is not None:
+        fa, fb = (x.loc[x.index <= when, cols] for x in halves)
+        # Cov(f_A, f_B) removes estimation noise: both halves share the true factor return,
+        # their estimation errors are independent, so the cross-covariance keeps only the signal.
+        if not scaled:
+            C, sd = _psd(_ewma_cross(fa.to_numpy(float), fb.to_numpy(float), halflife)), None
+        else:
+            sh2 = {}
+            for hh, idx in fa.groupby(fa.index.hour).groups.items():
+                M = _ewma_cross(fa.loc[idx].to_numpy(float), fb.loc[idx].to_numpy(float), 1e18)
+                sh2[hh] = np.maximum(np.diag((M + M.T) / 2), 0.0)       # noise-free variance per bar
+            pooled = np.sqrt(np.maximum(np.diag(_psd(_ewma_cross(
+                fa.to_numpy(float), fb.to_numpy(float), 1e18))), 0.0))
+            sd = pd.DataFrame({hh: np.where(v > 0, np.sqrt(v), pooled) for hh, v in sh2.items()}).T
+            sd.columns = cols
+            C = _psd(_ewma_cross(_standardize(fa, sd), _standardize(fb, sd), halflife))
+    elif not scaled:
+        C, sd = _ewma_cov(hist.to_numpy(float), halflife), None
+        if shrink:
+            C, shrinkage = _ledoit_wolf_shrink(C, hist.to_numpy(float)[-min_obs:])
+    else:
+        sd = hour_scales(hist, freq)
+        g = _standardize(hist, sd)                             # standardize each bar by its hour
+        C = _ewma_cov(g, halflife)
+        if shrink:
+            C, shrinkage = _ledoit_wolf_shrink(C, g[-min_obs:])
+    return C, sd, cols, len(hist), shrinkage, halves is not None
+
+
 def cov(when, freq: str = "hourly", horizon_bars: float = 1.0, target_hour: int | None = None,
         shrink: bool = True, min_obs: int = 252, hour_scaling: bool = True,
         halflife_days: float | None = None, eiv_correct: bool = True) -> pd.DataFrame:
@@ -228,121 +320,93 @@ def cov(when, freq: str = "hourly", horizon_bars: float = 1.0, target_hour: int 
     next one means forecasting tomorrow's 10:00 bar, which is ~2.6x more volatile - so the
     scale must come from the bar being predicted, not the bar you are standing on. It
     defaults to hour(when), i.e. "risk of the bar I am in".
+
+    `shrink` (Ledoit-Wolf) applies only when the split-half noise correction is off or
+    unavailable; the corrected estimate is conditioned by the eigenvalue floor instead.
     """
     when = pd.Timestamp(when)
-    f = _factor_returns(freq)
-    hist = f[f.index <= when]
-    if len(hist) < min_obs:
-        raise ValueError(f"only {len(hist)} periods of factor returns by {when}; need {min_obs}")
-
     halflife = (HALFLIFE_COV_DAYS if halflife_days is None else halflife_days) * BARS_PER_DAY[freq]
     h = _hour_of(when, freq) if target_hour is None else int(target_hour)
-
-    halves = _half_returns(freq) if eiv_correct else None
-    if halves is not None:
-        fa, fb = (x[x.index <= when] for x in halves)
-        fa, fb = fa[hist.columns], fb[hist.columns]
-        # Cov(f_A, f_B) removes estimation noise: both halves share the true factor return,
-        # their estimation errors are independent, so the cross-covariance keeps only the signal.
-        if freq == "daily" or not hour_scaling:
-            S = _psd(_ewma_cross(fa.to_numpy(float), fb.to_numpy(float), halflife))
-            scales = None
-        else:
-            sh2 = {}
-            for hh, idx in fa.groupby(fa.index.hour).groups.items():
-                M = _ewma_cross(fa.loc[idx].to_numpy(float), fb.loc[idx].to_numpy(float), 1e18)
-                sh2[hh] = np.maximum(np.diag((M + M.T) / 2), 0.0)       # noise-free variance per bar
-            if h not in sh2:
-                raise ValueError(f"no half-sample history for the {h}:00 bar")
-            pooled = np.sqrt(np.maximum(np.diag(_psd(_ewma_cross(
-                fa.to_numpy(float), fb.to_numpy(float), 1e18))), 0.0))
-            sd = pd.DataFrame({hh: np.where(v > 0, np.sqrt(v), pooled) for hh, v in sh2.items()}).T
-            sd.columns = hist.columns
-            g_a = fa / sd.reindex(fa.index.hour).to_numpy()
-            g_b = fb / sd.reindex(fb.index.hour).to_numpy()
-            C = _psd(_ewma_cross(g_a.to_numpy(float), g_b.to_numpy(float), halflife))
-            shv = sd.loc[h].to_numpy(float)
-            S = np.outer(shv, shv) * C
-            scales = sd.loc[h]
-        shrinkage = 0.0
-    elif not hour_scaling or freq == "daily":
-        S = _ewma_cov(hist.to_numpy(float), halflife)
-        scales = None
-        shrinkage = 0.0
+    C, sd, cols, n_obs, shrinkage, eiv = _cov_core(when, freq, float(halflife), bool(hour_scaling),
+                                                   bool(eiv_correct), bool(shrink), int(min_obs))
+    if sd is None:
+        S = C
     else:
-        s = hour_scales(hist, freq)
-        if h not in s.index:
-            raise ValueError(f"no history for the {h}:00 bar; available {sorted(s.index)}")
-        g = hist / s.reindex(hist.index.hour).to_numpy()       # standardize each bar by its hour
-        C = _ewma_cov(g.to_numpy(float), halflife)
-        if shrink:
-            C, _ = _ledoit_wolf_shrink(C, g.to_numpy(float)[-min_obs:])
-        sh = s.loc[h].to_numpy(float)
+        if h not in sd.index:
+            raise ValueError(f"no history for the {h}:00 bar; available {sorted(sd.index)}")
+        sh = sd.loc[h].to_numpy(float)
         S = np.outer(sh, sh) * C                               # rescale to this bar
-        scales = s.loc[h]
-        shrinkage = 0.0
-    if shrink and scales is None and halves is None:
-        S, shrinkage = _ledoit_wolf_shrink(S, hist.to_numpy(float)[-min_obs:])
 
     # Condition the FINAL matrix. Flooring eigenvalues of the standardized matrix is not enough:
     # rescaling by per-bar factor volatilities (market ~80bp vs Size ~15bp) re-breaks the
     # conditioning, and the optimizer has to invert this. An ill-conditioned Sigma lets the
     # optimizer find near-riskless directions that are really estimation noise.
     S = _psd(S, floor_ratio=MIN_EIGEN_RATIO)
-    cond = float(np.linalg.cond(S))
-    out = pd.DataFrame(S * horizon_bars, index=hist.columns, columns=hist.columns)
-    out.attrs.update(when=when, hour=h, n_obs=len(hist), freq=freq,
-                     horizon_bars=horizon_bars, hour_scaled=scales is not None,
-                     shrinkage=shrinkage, eiv_corrected=halves is not None, condition=cond)
+    out = pd.DataFrame(S * horizon_bars, index=cols, columns=cols)
+    out.attrs.update(when=when, hour=h, n_obs=n_obs, freq=freq,
+                     horizon_bars=horizon_bars, hour_scaled=sd is not None,
+                     shrinkage=shrinkage, eiv_corrected=eiv, condition=float(np.linalg.cond(S)))
     return out
 
 
 # ------------------------------------------------------------------ D
+@lru_cache(maxsize=32)
+def _spec_core(when: pd.Timestamp, freq: str, halflife_days: float, hour_scaling: bool):
+    """Per-stock standardized residual variance and the per-hour residual scales, as of `when`.
+
+    Returns (var, by_hour, pooled): var is NaN for a stock with fewer than MIN_SPEC_OBS
+    residuals. Cached: the returned objects must not be modified.
+    """
+    a = _residual_arrays(freq)
+    now = when.as_unit("ns").value
+    n = int(np.searchsorted(a["stamp"], now, side="right"))
+    if n == 0:
+        raise ValueError(f"no residuals on or before {when}")
+    resid, hcode, kcode = a["resid"][:n], a["hcode"][:n], a["kcode"][:n]
+    pooled = float(resid.std(ddof=1)) if n > 1 else 0.0
+
+    by_hour = None
+    if hour_scaling and freq == "hourly":
+        H = len(a["hours"])
+        cnt = np.bincount(hcode, minlength=H).astype(float)
+        s1, s2 = np.bincount(hcode, resid, minlength=H), np.bincount(hcode, resid * resid, minlength=H)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sd = np.sqrt(np.maximum(s2 - s1 ** 2 / cnt, 0.0) / (cnt - 1))
+        sd[(cnt < MIN_HOUR_OBS) | ~(sd > 0)] = pooled
+        by_hour = pd.Series(sd, index=a["hours"])
+        resid = resid / sd[hcode]                              # standardized residuals
+
+    age = (now - a["stamp"][:n]) / 86400e9 * (TRADING_DAYS / CALENDAR_DAYS_PER_YEAR)   # trading days
+    w = 0.5 ** (age / halflife_days)
+    K = len(a["keys"])
+    num, den = np.bincount(kcode, w * resid ** 2, minlength=K), np.bincount(kcode, w, minlength=K)
+    cnt_k = np.bincount(kcode, minlength=K)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        var = np.where(cnt_k >= MIN_SPEC_OBS, num / den, np.nan)
+    return pd.Series(var, index=a["keys"])[cnt_k > 0], by_hour, pooled
+
+
 def specific_var(when, freq: str = "hourly", horizon_bars: float = 1.0, target_hour: int | None = None,
                  index: pd.Index | None = None, hour_scaling: bool = True,
                  halflife_days: float | None = None) -> pd.Series:
     """Per-stock specific variance: standardized variance x the scale of the bar being forecast.
 
     `target_hour` works exactly as in cov() - the bar being predicted, not the one you stand on.
+    A stock with too little history gets the median stock's variance.
     """
     when = pd.Timestamp(when)
-    u = _residuals(freq)
-    stamp = u["date"] if freq == "daily" else u["date"] + pd.to_timedelta(u["hour"], unit="h")
-    hist = u[stamp <= when].copy()
-    hist["stamp"] = stamp[stamp <= when]
-    if hist.empty:
-        raise ValueError(f"no residuals on or before {when}")
-
     h = _hour_of(when, freq) if target_hour is None else int(target_hour)
-    resid = hist["resid"].to_numpy(float)
-    if hour_scaling and freq == "hourly":
-        by_hour = hist.groupby("hour")["resid"].std()
-        n_hour = hist.groupby("hour")["resid"].size()
-        by_hour[n_hour < MIN_HOUR_OBS] = hist["resid"].std()
-        scale_h = float(by_hour.get(h, hist["resid"].std()))
-        resid = resid / hist["hour"].map(by_hour).to_numpy(float)   # standardized residuals
-    else:
-        scale_h = 1.0
-
     hl_days = HALFLIFE_SPEC_DAYS if halflife_days is None else halflife_days
-    halflife_bars = hl_days * BARS_PER_DAY[freq]
-    age = (when - hist["stamp"]).dt.total_seconds().to_numpy() / 86400
-    w = 0.5 ** (age / hl_days)
-    d = pd.DataFrame({"key": hist["key"].to_numpy(), "sw": w * resid ** 2, "w": w})
-    agg = d.groupby("key").agg(num=("sw", "sum"), den=("w", "sum"), n=("w", "size"))
-    var = (agg["num"] / agg["den"]).where(agg["n"] >= MIN_SPEC_OBS)
+    var, by_hour, pooled = _spec_core(when, freq, float(hl_days), bool(hour_scaling))
+    scale_h = 1.0 if by_hour is None else float(by_hour.get(h, pooled))
     var = var.fillna(var.median()) * (scale_h ** 2) * horizon_bars
-    var.name = "specific_var"
-
     if index is not None:                      # B.index is already the normalized ticker key
         var = var.reindex(index).fillna(var.median())
-        var.name = "specific_var"
+    var.name = "specific_var"
     return var
 
 
 # ------------------------------------------------------------------ convenience
-
-
 def forward_hours(when, n_bars: int, freq: str = "hourly") -> list[int]:
     """Which bars the next `n_bars` fall in, starting after `when`.
 
@@ -388,11 +452,16 @@ def specific_var_span(when, n_bars: int = 7, freq: str = "hourly", **kw) -> pd.S
 
 
 def total_risk(weights: pd.Series, when, freq: str = "hourly", horizon_bars: int = 1) -> dict:
-    """Annualized risk of a weight vector held for `horizon_bars` bars from `when`.
+    """Risk of a weight vector (indexed by key) held for `horizon_bars` bars from `when`.
 
     horizon_bars=1 is the hourly holding period; 7 is one trading day, the alpha's horizon.
     For more than one bar the per-bar covariances are SUMMED over the bars actually spanned
     (cov_span), never scaled by sqrt(n) - bars differ too much for that to be valid.
+
+    `vol_bp` is the volatility over the horizon itself. The `_ann` figures scale it to a year
+    as if every period were like this one: meaningful for a full trading day (horizon_bars=7),
+    but for a single bar they overstate (10:00, which holds the overnight move) or understate
+    (midday) the true annual risk.
     """
     B = exposures(when, freq=freq)
     w = weights.reindex(B.index).fillna(0.0).to_numpy()
@@ -407,7 +476,8 @@ def total_risk(weights: pd.Series, when, freq: str = "hourly", horizon_bars: int
     ann = np.sqrt(TRADING_DAYS * BARS_PER_DAY[freq] / horizon_bars)
     return {"total_risk_ann": np.sqrt(fac + spec) * ann, "factor_risk_ann": np.sqrt(fac) * ann,
             "specific_risk_ann": np.sqrt(spec) * ann, "factor_share_of_var": fac / (fac + spec),
-            "bar_vol_bp": np.sqrt(fac + spec) * 1e4, "n_stocks": int((w != 0).sum())}
+            "vol_bp": np.sqrt(fac + spec) * 1e4, "bar_vol_bp": np.sqrt((fac + spec) / n) * 1e4,
+            "n_stocks": int((w != 0).sum())}
 
 
 def main():
@@ -416,6 +486,7 @@ def main():
     p.add_argument("--when", default=None, help="default: the last bar with factor returns")
     a = p.parse_args()
     when = pd.Timestamp(a.when) if a.when else _factor_returns(a.freq).index.max()
+    day_bars = BARS_PER_DAY[a.freq]
 
     B = exposures(when, freq=a.freq)
     names = factor_names(a.freq)
@@ -423,34 +494,33 @@ def main():
     print(f"  B  {len(B)} stocks x {len(names)} factors")
 
     if a.freq == "hourly":
-        print(f"\n  risk of the cap-weighted index, bar by bar (same day, same B):")
+        print(f"\n  risk of the cap-weighted index over the NEXT bar, standing at each bar of the day:")
         day = pd.Timestamp(when).normalize()
         cap = B["me"] / B["me"].sum()
-        for hour in range(10, 17):
+        for hour in TRADING_HOURS:
             t = day.replace(hour=hour)
             if t > _factor_returns(a.freq).index.max():
                 continue
             r = total_risk(cap, t, freq=a.freq)
-            print(f"    {hour:2d}:00   {r['bar_vol_bp']:6.1f} bp per bar   "
-                  f"({r['total_risk_ann']:6.2%} annualized)")
+            print(f"    at {hour:2d}:00 -> next bar {forward_hours(t, 1)[0]:2d}:00   {r['vol_bp']:6.1f} bp")
         print("  a single pooled covariance would report the same number for every row above")
 
     S = cov(when, freq=a.freq)
     D = specific_var(when, freq=a.freq, index=B.index)
     ev = np.linalg.eigvalsh(S.to_numpy())
     print(f"\n  Sigma_f  {S.shape[0]}x{S.shape[1]}, {S.attrs['n_obs']:,} bars of history, "
-          f"hour-scaled {S.attrs['hour_scaled']}")
+          f"hour-scaled {S.attrs['hour_scaled']}, noise-corrected {S.attrs['eiv_corrected']}")
     print(f"  eigenvalues: min {ev[0]:.2e}, max {ev[-1]:.2e}, condition {ev[-1] / ev[0]:.1f}, "
           f"PSD {bool(ev[0] > 0)}")
     print(f"  D  {len(D)} stocks, median specific vol {np.sqrt(D.median()) * 1e4:.1f} bp per bar")
 
     cap = B["me"] / B["me"].sum()
     eq = pd.Series(1 / len(B), index=B.index)
-    print()
+    print(f"\n  risk over one trading day ({day_bars} bar{'s' if day_bars > 1 else ''}), annualized:")
     for label, w in [("cap-weighted S&P 500", cap), ("equal-weighted S&P 500", eq),
                      ("active: EW - CW", eq - cap)]:
-        r = total_risk(w, when, freq=a.freq)
-        print(f"  {label:24s} {r['bar_vol_bp']:6.1f} bp/bar  "
+        r = total_risk(w, when, freq=a.freq, horizon_bars=day_bars)
+        print(f"  {label:24s} {r['vol_bp']:6.1f} bp/day  "
               f"total {r['total_risk_ann']:7.2%}  factor {r['factor_risk_ann']:7.2%}  "
               f"specific {r['specific_risk_ann']:6.2%}")
 
