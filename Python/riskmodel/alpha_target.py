@@ -3,13 +3,22 @@
 Build the alpha models' forecast target: 1-DAY-AHEAD residual return, sampled every hour.
 
 The team's spec (confirmed with ws2840): the target is a 1-day leading return, open to open.
-A decision made at 10:00 targets the move from today's 10:00 open to tomorrow's 10:00 open.
+The target of the 10:00 row is the return from the open of the 11:00 bar to the open of the
+next day's 11:00 bar. The 11:00 bar covers (10:00, 11:00], so its open is the price at 10:00:
+the first price the book can trade at after a decision made on data up to 10:00.
 Predictions are made every hour, so the horizons OVERLAP - at 11:00 you forecast 11:00 to
 tomorrow 11:00, which shares 6 of its 7 bars with the 10:00 forecast.
 
     forecast horizon      1 trading day   (what the alpha predicts)
-    prediction frequency  1 hour          (a fresh forecast every bar)
-    rebalance frequency   1 hour          (holding period between trades)
+    prediction frequency  1 hour          (a fresh forecast at 10:00, 11:00, ..., 15:00)
+    rebalance frequency   1 hour          (holding period between trades; overnight after 15:00)
+
+DECISION TIMES. The book does not trade in 09:30-10:00 or in 15:00-16:00, so decisions are
+made at 10:00, 11:00, 12:00, 13:00, 14:00 and 15:00 only (common.DECISION_HOURS), and only
+those rows are written. There is NO 16:00 row: nothing is traded at the close, and the next
+price the book could act on is 10:00 the following day - which is already the 10:00 row.
+The 16:00 BAR is still part of every window that spans it (a 15:00 decision's target runs
+15:00 -> 15:00 and includes it); only the 16:00 DECISION is dropped.
 
 Horizon and holding period are deliberately different. That is the Garleanu-Pedersen setting:
 a slowly decaying signal traded frequently, where the optimizer should move PART of the way
@@ -38,7 +47,9 @@ how many bars the window held.
 NOTE ON OPEN vs CLOSE. Our bars give close-to-close returns. In continuous trading the close
 of the bar ending at 10:00 and the open of the bar starting at 10:00 are the same moment, so
 summing bars 11:00..10:00(next day) reproduces the 10:00-open-to-10:00-open return. The
-only discrepancy is the gap between a bar's last print and the next bar's first print.
+only discrepancy is the gap between a bar's last print and the next bar's first print:
+against the open-to-open return computed from the raw bars (Mar-Jul 2024) the correlation
+is 0.998-0.9995 at every decision hour, with a median difference of 2-4 bp on a ~175 bp target.
 
 Inputs : data/riskmodel/residuals_hourly.parquet (+ residuals_covered_hourly.parquet)
 Outputs: data/riskmodel/alpha_target_1d.parquet
@@ -64,9 +75,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `riskmodel.co
 sys.path.insert(0, str(Path(__file__).resolve().parent))      # resolves however this is run
 
 try:
-    from riskmodel.common import RM_DIR, norm_ticker, load_hourly_returns
+    from riskmodel.common import RM_DIR, DECISION_HOURS, norm_ticker, load_hourly_returns
 except ImportError:
-    from common import RM_DIR, norm_ticker, load_hourly_returns
+    from common import RM_DIR, DECISION_HOURS, norm_ticker, load_hourly_returns
 
 
 def next_day_positions(index: pd.DatetimeIndex) -> np.ndarray:
@@ -92,6 +103,8 @@ def forward_sum(wide: pd.DataFrame, pos: np.ndarray) -> pd.DataFrame:
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--hours", type=int, nargs="+", default=DECISION_HOURS,
+                   help="decision times (bar ends) to write a target for; default: the hours the book trades")
     p.add_argument("--out", default=str(RM_DIR))
     a = p.parse_args()
 
@@ -117,6 +130,8 @@ def main():
 
     pos = next_day_positions(resid.index)
     fwd_u, fwd_r = forward_sum(resid, pos), forward_sum(raw, pos)
+    decision = resid.index.hour.isin(a.hours)                 # only times the book can trade
+    fwd_u, fwd_r = fwd_u[decision], fwd_r[decision]
     when = pd.DataFrame({"target_time": resid.index[np.maximum(pos, 0)].where(pos >= 0),
                          "n_bars": np.where(pos >= 0, pos - np.arange(len(pos)), 0)}, index=resid.index)
 

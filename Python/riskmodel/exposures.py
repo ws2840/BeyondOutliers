@@ -25,15 +25,23 @@ IDENTITY. Each row is resolved to `key`, the normalized ticker of the S&P 500 me
 keyed on. Where two share classes of one company both match a member (LEN / LEN.B), the
 larger one is kept.
 
-SECTORS. `sector` is the GICS sector: point-in-time from JKP `gics` where available, filled
-by ticker from data/universe/sp500_instrument.csv, else "Other". `sector_model` is the
+SECTORS. `sector` is the GICS sector and `sector_src` says where it came from:
+    jkp          JKP `gics` at that month-end (point in time)
+    jkp_carried  the stock's own most recent earlier JKP `gics` (point in time)
+    current_list data/universe/sp500_instrument.csv, by ticker. NOT point in time: it is
+                 today's classification of today's members, applied to the past. JKP has no
+                 `gics` at all for ~100 index members, so this cannot be avoided without a
+                 historical GICS source; where both exist they disagree on 8% of 2018 rows,
+                 about 1% in 2023 and under 0.5% after.
+    none         unknown -> "Other"
+`sector_model` is the
 sector FACTOR the stock loads on: its own sector if at least MIN_SECTOR estimation stocks
 share it that month, otherwise the pooled "Other" factor, otherwise none (""). Deciding this
 once per month-end, here, is what keeps the regression (factor_returns.py) and the served
 exposures (model.py) on the same definition.
 
 Output: data/riskmodel/exposures.parquet
-    permno, eom, ticker, ticker_cls, key, me, in_sp500, sector, sector_model,
+    permno, eom, ticker, ticker_cls, key, me, in_sp500, sector, sector_src, sector_model,
     <13 cluster composites>
 
 Run (from repo root):
@@ -85,16 +93,27 @@ def cluster_composites(panel: pd.DataFrame, clusters: dict[str, list[str]],
     return pd.concat(out)
 
 
-def attach_sector(df: pd.DataFrame) -> pd.Series:
-    """Point-in-time GICS sector from JKP, filled from the S&P 500 instrument file, else 'Other'."""
+def attach_sector(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """GICS sector and where it came from (see SECTORS in the module docstring).
+
+    Point-in-time sources are used first: JKP's `gics` for the month, then the same stock's
+    last known earlier `gics`. Only what is still missing falls back to today's member list.
+    """
     sector = (pd.to_numeric(df["gics"], errors="coerce") // 1_000_000).map(GICS_SECTORS)
+    src = pd.Series(np.where(sector.notna(), "jkp", None), index=df.index, dtype=object)
+    order = df["eom"].sort_values(kind="stable").index           # carry FORWARD in time only
+    carried = sector.loc[order].groupby(df["permno"].loc[order]).ffill().reindex(df.index)
+    src = src.where(sector.notna() | carried.isna(), "jkp_carried")
+    sector = carried
     if INSTRUMENT_PATH.exists():
         inst = pd.read_csv(INSTRUMENT_PATH)
         imap = dict(zip(norm_ticker(inst["Symbol"]), inst["GICS Sector"]))
         for col in ("key", "ticker_cls", "ticker"):
             if col in df.columns:
-                sector = sector.fillna(norm_ticker(df[col].fillna("")).map(imap).set_axis(df.index))
-    return sector.fillna("Other")
+                fill = norm_ticker(df[col].fillna("")).map(imap).set_axis(df.index)
+                src = src.where(sector.notna() | fill.isna(), "current_list")
+                sector = sector.fillna(fill)
+    return sector.fillna("Other"), src.fillna("none")
 
 
 def sp500_key(df: pd.DataFrame) -> pd.Series:
@@ -178,12 +197,14 @@ def main():
     not_member = ~src["in_sp500"]
     src.loc[not_member, "key"] = norm_ticker(src.loc[not_member, "ticker_cls"].fillna("")).to_numpy()
 
-    src["sector"] = attach_sector(src)
+    src["sector"], src["sector_src"] = attach_sector(src)
     if a.universe == "sp500":
         src = src[src["in_sp500"]].reset_index(drop=True)
         print(f"standardizing within the S&P 500: {len(src):,} rows, "
               f"{int(src.groupby('eom').size().median())} stocks per month")
     src["sector_model"] = model_sector(src)
+    share = src.loc[src["in_sp500"], "sector_src"].value_counts(normalize=True)
+    print("sector source (S&P 500 rows): " + ", ".join(f"{k} {v:.1%}" for k, v in share.items()))
     last = src[src["in_sp500"] & (src["eom"] == src["eom"].max())]
     print(f"sector factors at {src['eom'].max().date()}: "
           + ", ".join(f"{s or '(none)'} {n}" for s, n in last["sector_model"].value_counts().sort_index().items()))
@@ -192,7 +213,7 @@ def main():
     out = pd.DataFrame({"permno": src["permno"], "eom": src["eom"], "ticker": src["ticker"],
                         "ticker_cls": src["ticker_cls"], "key": src["key"], "me": src["me"].astype(float),
                         "in_sp500": src["in_sp500"], "sector": src["sector"],
-                        "sector_model": src["sector_model"]})
+                        "sector_src": src["sector_src"], "sector_model": src["sector_model"]})
     out = pd.concat([out, comp.drop(columns="eom")], axis=1)
 
     path = Path(a.out)

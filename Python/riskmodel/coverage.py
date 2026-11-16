@@ -44,7 +44,12 @@ return sets, so model.py's noise correction covers the new factor too.
 
 NO LOOK-AHEAD: the exposures for month-end m use only bars strictly before m, and apply to bars
 strictly after m, exactly as for tier 1. Stocks that join the index during the month get a row
-too, so nothing waits for the next month-end to be covered.
+too, so nothing waits for the next month-end to be covered; that row's VALUES still use only
+data before m, and model.exposures() does not serve it until the day the stock is a member.
+Which sectors get a second-stage factor is decided from the members as of m, and the
+half-sample split of a stock depends on the stock and the month alone - never on which other
+stocks trade later in the month. (The sector of these names comes from today's member list,
+which is not point in time; see exposures.py.)
 
 Inputs : data/riskmodel/{exposures, factor_returns_hourly, factor_returns_half*_hourly}.parquet,
          data/returns/1h_bar.parquet
@@ -59,6 +64,7 @@ Run (from repo root):
 """
 import argparse
 import sys
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -69,10 +75,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     from riskmodel.common import (RM_DIR, INSTRUMENT_PATH, MEMBERSHIP_PATH, ID_COLS, MAX_STALE_DAYS,
-                                  MIN_SECTOR, TRADING_HOURS, norm_ticker, load_hourly_returns)
+                                  MIN_SECTOR, TRADING_HOURS, norm_ticker, load_hourly_returns, members_on)
 except ImportError:
     from common import (RM_DIR, INSTRUMENT_PATH, MEMBERSHIP_PATH, ID_COLS, MAX_STALE_DAYS,
-                        MIN_SECTOR, TRADING_HOURS, norm_ticker, load_hourly_returns)
+                        MIN_SECTOR, TRADING_HOURS, norm_ticker, load_hourly_returns, members_on)
 
 
 BARS_PER_DAY = len(TRADING_HOURS)
@@ -183,7 +189,10 @@ def main():
 
         Fwin = F[F.index < eom].iloc[-window:]
         sec_of = {k: sectors.get(k, "Other") for k in missing}
-        n_cov = pd.Series(sec_of).value_counts() if missing else pd.Series(dtype=int)
+        # count only names that are members AT the month-end: entrants later in the month must
+        # not decide whether a sector gets a factor
+        at_eom = members_on(eom)
+        n_cov = pd.Series([sec_of[k] for k in missing if k in at_eom], dtype=object).value_counts()
         s2 = {s for s, n in n_cov.items() if s not in s1 and s != "Other" and n >= MIN_SECTOR}
 
         n2 = n3 = 0
@@ -206,7 +215,8 @@ def main():
             if not np.isfinite(me_fill):
                 me_fill = g["me"].median()
             row = {"permno": np.nan, "eom": eom, "ticker": ticker_of.get(key, key), "ticker_cls": None,
-                   "key": key, "me": me_fill, "in_sp500": True, "sector": sec, "sector_model": sm,
+                   "key": key, "me": me_fill, "in_sp500": True, "sector": sec,
+                   "sector_src": "current_list" if key in sectors else "none", "sector_model": sm,
                    "tier": tier, "n_bars": nobs}
             row.update(dict(zip(styles, b)))
             month_rows.append(row)
@@ -249,15 +259,15 @@ def main():
         e0 = before_sector(F, W)
         common = W.index.intersection(FH[0].index).intersection(FH[1].index) if FH is not None else None
         eh = [before_sector(Fx, W.loc[common]) for Fx in FH] if FH is not None and len(common) else None
-        for k, sec in enumerate(sorted(s2)):
+        for sec in sorted(s2):
             cols = np.flatnonzero(sm_arr == sec)
             f2 = sector_mean(e0, cols, MIN_STAGE2)
             F2.loc[W.index, sec] = f2
             e0[:, cols] -= np.nan_to_num(f2)[:, None]
             if eh is not None:
-                rng = np.random.default_rng([0, eom.toordinal(), k])
-                perm = rng.permutation(cols)
-                for half, e_half, cols_half in zip(F2H, eh, (perm[::2], perm[1::2])):
+                # which half a stock falls in depends on the stock and the month alone
+                side = np.array([zlib.crc32(f"{key}|{eom.toordinal()}".encode()) % 2 for key in W.columns[cols]])
+                for half, e_half, cols_half in zip(F2H, eh, (cols[side == 0], cols[side == 1])):
                     half.loc[common, sec] = sector_mean(e_half, cols_half, (MIN_STAGE2 + 1) // 2)
 
         long = pd.DataFrame(e0, index=W.index, columns=W.columns).stack().rename("resid").reset_index()

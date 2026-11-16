@@ -52,9 +52,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from riskmodel import model  # noqa: E402
 
 try:
-    from riskmodel.common import RM_DIR, BARS_PER_DAY, load_hourly_returns
+    from riskmodel.common import RM_DIR, BARS_PER_DAY, DECISION_HOURS, load_hourly_returns
 except ImportError:
-    from common import RM_DIR, BARS_PER_DAY, load_hourly_returns
+    from common import RM_DIR, BARS_PER_DAY, DECISION_HOURS, load_hourly_returns
 
 WARMUP = 252          # trading days of factor-return history before the first test
 
@@ -119,6 +119,10 @@ def main():
                         "trading day, the horizon the alpha models forecast over. Test points "
                         "must be at least this far apart (--every) or the windows overlap and "
                         "the confidence band is invalid.")
+    p.add_argument("--holding", action="store_true",
+                   help="test the book's real holding periods: start only at the times it trades "
+                        "(10:00-15:00) and hold until it can trade again - 1 bar, or 2 bars from "
+                        "15:00 (the 16:00 bar plus the overnight 10:00 bar). Overrides --horizon-bars.")
     p.add_argument("--save-z", action="store_true",
                    help="also write the raw per-period z scores. Off by default: the summary CSV is what the report reads.")
     p.add_argument("--out", default=str(RM_DIR))
@@ -133,6 +137,8 @@ def main():
         dates = [d for d in dates if d >= pd.Timestamp(a.start)]
     if a.end:
         dates = [d for d in dates if d < pd.Timestamp(a.end) + pd.Timedelta(1, unit="D")]
+    if a.holding:
+        dates = [d for d in dates if d.hour in DECISION_HOURS]
     test_dates = dates[::a.every]
     print(f"bias test ({a.freq}) on {len(test_dates):,} periods, {test_dates[0]} -> {test_dates[-1]} "
           f"(every {a.every})")
@@ -149,29 +155,29 @@ def main():
     raw = model._exposures()
     rows = []
     for t in test_dates:
-        fwd = R.index[R.index > t][:a.horizon_bars]
-        if len(fwd) < a.horizon_bars:
+        hb = model.holding_bars(t, a.freq) if a.holding else a.horizon_bars
+        fwd = R.index[R.index > t][:hb]
+        if len(fwd) < hb:
             continue
         nxt = fwd[0]
         # the forecast is for bar `nxt`, so its hour sets the scale; history stops at `t`
         th = None if a.freq == "daily" else int(pd.Timestamp(nxt).hour)
         try:
             B = model.exposures(t, freq=a.freq)
-            if a.horizon_bars == 1:
+            if hb == 1:
                 S = model.cov(t, freq=a.freq, target_hour=th, halflife_days=a.halflife).to_numpy()
                 D = model.specific_var(t, freq=a.freq, target_hour=th, index=B.index,
                                        halflife_days=a.spec_halflife).to_numpy()
             else:   # position held several bars: sum each bar's own covariance
-                S = model.cov_span(t, a.horizon_bars, freq=a.freq,
+                S = model.cov_span(t, hb, freq=a.freq,
                                    halflife_days=a.halflife).to_numpy()
-                D = model.specific_var_span(t, a.horizon_bars, freq=a.freq, index=B.index,
+                D = model.specific_var_span(t, hb, freq=a.freq, index=B.index,
                                             halflife_days=a.spec_halflife).to_numpy()
         except ValueError:
             continue
 
         # held for horizon_bars with no rebalancing -> the realised return is the sum of bars
-        r_next = (R.loc[fwd].sum(min_count=a.horizon_bars) if a.horizon_bars > 1
-                  else R.loc[nxt]).reindex(B.index)
+        r_next = (R.loc[fwd].sum(min_count=hb) if hb > 1 else R.loc[nxt]).reindex(B.index)
         have = r_next.notna().to_numpy()
         if have.sum() < 50:
             continue
@@ -193,7 +199,7 @@ def main():
                 continue
             sigma = np.sqrt(var)
             realized = float(np.nansum(wv * r_next.to_numpy()))
-            rows.append({"date": t, "portfolio": label, "sigma_pred": sigma,
+            rows.append({"date": t, "hour": t.hour, "portfolio": label, "sigma_pred": sigma,
                          "realized": realized, "z": realized / sigma})
 
     z = pd.DataFrame(rows)
@@ -222,7 +228,7 @@ def main():
         return "index/active"
     out["group"] = [grp(s) for s in out.index]
     out = out.sort_values(["group", "portfolio"])
-    tag = a.freq + (f"_h{a.horizon_bars}" if a.horizon_bars != 1 else "") \
+    tag = a.freq + ("_holding" if a.holding else f"_h{a.horizon_bars}" if a.horizon_bars != 1 else "") \
           + (f"_hl{a.halflife:g}" if a.halflife else "") + (f"_shl{a.spec_halflife:g}" if a.spec_halflife else "") \
           + (f"_to{pd.Timestamp(a.end):%Y%m%d}" if a.end else "")
     out.to_csv(Path(a.out) / f"bias_test_{tag}.csv")
@@ -234,6 +240,11 @@ def main():
         print(sub[["n", "bias_stat", "ci_low", "ci_high", "within_ci",
                    "mean_pred_vol_bp", "realized_vol_bp"]].round(3).to_string())
         print()
+    if a.holding and a.freq == "hourly":          # does the overnight (15:00) hold calibrate as well as the 1-bar holds?
+        by_hour = z.groupby(["hour", "portfolio"])["z"].std(ddof=1).groupby("hour").agg(["mean", "min", "max", "size"])
+        by_hour.insert(0, "bars_held", [model.holding_bars(pd.Timestamp(2000, 1, 3, int(h))) for h in by_hour.index])
+        by_hour.round(3).to_csv(Path(a.out) / f"bias_test_{tag}_by_hour.csv")
+        print("bias statistic by decision hour (mean / min / max over portfolios):\n" + by_hour.round(3).to_string() + "\n")
     by_group = out.groupby("group")["bias_stat"].agg(["mean", "min", "max"]).round(3)
     print("bias statistic by group:\n" + by_group.to_string() + "\n")
     print(f"passing portfolios: {int(out['within_ci'].sum())} of {len(out)}")

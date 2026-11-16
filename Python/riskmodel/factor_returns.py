@@ -197,7 +197,10 @@ def run_regressions(panel, styles, use_sectors, ridge, split_half=True, seed=0):
     fa_rows, fb_rows = [], []
     for period, g in panel.groupby(["date", "hour"], sort=True):
         date, hour = period
-        g = g.reset_index(drop=True)
+        # Fixed row order within the bar. The factor returns do not care, but the random
+        # half-split picks rows by position: without this it would depend on how the whole
+        # panel happened to be sorted, i.e. on data from other dates (a truncation test caught it).
+        g = g.sort_values("key", kind="stable").reset_index(drop=True)
         A, T, names, present = design(g, styles, use_sectors)
         if len(g) < 3 * A.shape[1]:
             diag.append({"date": date, "hour": hour, "n": len(g), "r2": np.nan,
