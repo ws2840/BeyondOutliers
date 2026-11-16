@@ -66,11 +66,13 @@ except ImportError:
     from common import RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, BARS_PER_DAY, norm_ticker
 
 
-HALFLIFE_COV_DAYS = 10      # trading days. Chosen by sweeping 10/21/42/63 through bias_test.py.
-                            # NOTE: that sweep ran on the whole sample, hidden test years included,
-                            # and before the regression was corrected. Re-tune with
-                            # `bias_test.py --end <last training day> --halflife N` before relying on it.
-HALFLIFE_SPEC_DAYS = 126    # trading days
+HALFLIFE_COV_DAYS = 10      # trading days. Checked on the training years only
+                            # (`bias_test.py --every 30 --end 2024-11-10 --halflife N`, 319 bars per
+                            # portfolio): 5 / 10 / 21 / 42 give a mean |B - 1| across the 48 test
+                            # portfolios of 0.060 / 0.056 / 0.056 / 0.058. The test cannot separate
+                            # them, so 10 is kept; it is not a tuned optimum.
+HALFLIFE_SPEC_DAYS = 126    # trading days. Same check with --spec-halflife: 42 / 63 / 126 / 252 give
+                            # 0.050 / 0.052 / 0.056 / 0.060 - shorter is marginally better, within noise.
 MIN_SPEC_OBS = 60
 MIN_HOUR_OBS = 100          # bars of a given hour needed before trusting its own scale
 MIN_EIGEN_RATIO = 1e-3      # floor on Sigma_f's eigenvalues as a share of its largest, so the

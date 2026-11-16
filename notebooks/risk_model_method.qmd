@@ -407,8 +407,11 @@ Markdown(f"Across all {len(bt)} portfolios, {int(bt['within_ci'].sum())} are ins
 
 - **The model ends in mid-February 2026.** JKP characteristics stop at 2025-12-31 and exposures
   older than 45 days are refused. Later bars have no exposures, residuals or targets.
-- **Half-lives were not re-tuned.** The covariance half-life was chosen on the full sample. It
-  should be re-chosen on the training years only (`bias_test.py --end ... --halflife ...`).
+- **The half-lives are only loosely pinned down.** On the training years alone (bias test through
+  2024-11-10, 319 bars per portfolio), covariance half-lives of 5, 10, 21 and 42 days give a mean
+  distance of the bias statistic from 1 of 0.060, 0.056, 0.056 and 0.058, and specific-variance
+  half-lives of 42, 63, 126 and 252 days give 0.050, 0.052, 0.056 and 0.060. The test cannot
+  separate these, so the current 10 and 126 are kept; they are not tuned optima.
 - **Market cap of tier-2/3 stocks is approximate** (the sector's median), because JKP has no
   market cap for them. It only affects cap-weighted benchmark weights.
 - **The universe file** (`sp500_universe_early_end.csv`) ends each membership a year early and
