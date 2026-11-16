@@ -2,9 +2,9 @@
 """
 Does the risk model actually predict risk? (bias test)
 
-The standard validation for a risk model. On each test date t the model predicts the
-one-day volatility sigma_t of a portfolio using ONLY data up to t. The next day's
-realized return r_{t+1} is then standardized:
+The standard validation for a risk model. On each test bar t the model predicts the
+volatility sigma_t of a portfolio over the next bar (or the next --horizon-bars bars) using
+ONLY data up to t. The realized return r_{t+1} is then standardized:
 
     z_t = r_{t+1} / sigma_t
 
@@ -21,16 +21,25 @@ This is out-of-sample by construction: model.cov(t) and model.specific_var(t) us
 returns and residuals dated <= t, and exposures come from the month-end before t.
 
 Portfolios tested: the cap-weighted and equal-weighted index, the EW-CW active bet,
-single-style tilts (long high exposure, short low), and random long-short books. A model
-that works only on the index but fails on style tilts is not usable by an optimizer.
+single-style tilts (long high exposure, short low), sector tilts (one sector against the
+index - the test that catches a sector with no factor), and random long-short books. A model
+that works only on the index but fails on tilts is not usable by an optimizer.
 
-Inputs : data/riskmodel/* (exposures.py -> factor_returns.py -> model.py)
-Outputs: data/riskmodel/bias_test.csv        one row per portfolio
-         data/riskmodel/bias_test_z.parquet  every standardized return
+READING THE RESULT. Judge each portfolio on its own row. The pooled "overall" number mixes
+portfolios whose returns are correlated and lets an overstated group cancel an understated
+one, so it is reported together with the mean |B - 1| across portfolios, which cannot cancel.
+
+TUNING. If this test is used to choose a halflife, restrict it to the training years with
+--end; the hidden test years must not pick the model's parameters.
+
+Inputs : data/riskmodel/* (pipeline.py)
+Outputs: data/riskmodel/bias_test_<tag>.csv        one row per portfolio
+         data/riskmodel/bias_test_z_<freq>.parquet every standardized return (--save-z)
 
 Run (from repo root):
     python Python/riskmodel/bias_test.py
     python Python/riskmodel/bias_test.py --every 1 --n-random 50
+    python Python/riskmodel/bias_test.py --end 2024-11-10 --halflife 21
 """
 import argparse
 import sys
@@ -43,29 +52,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from riskmodel import model  # noqa: E402
 
 try:
-    from riskmodel.common import ROOT, RM_DIR, RETURNS_PATH, MAX_ABS_RET, norm_ticker
+    from riskmodel.common import RM_DIR, BARS_PER_DAY, load_hourly_returns
 except ImportError:
-    from common import ROOT, RM_DIR, RETURNS_PATH, MAX_ABS_RET, norm_ticker
+    from common import RM_DIR, BARS_PER_DAY, load_hourly_returns
 
 WARMUP = 252          # trading days of factor-return history before the first test
 
 
-
 def returns_wide(freq: str = "hourly") -> pd.DataFrame:
     """Stock returns indexed by period (bar end for hourly, date for daily) x normalized ticker."""
-    r = pd.read_parquet(RETURNS_PATH)
-    key = pd.Series(norm_ticker(r["ticker"]).to_numpy(), index=r.index, name="key")
+    r = load_hourly_returns()
     if freq == "hourly":
-        period = pd.Series(r.index.tz_localize(None), index=r.index, name="period")
-        d = r["ret"].groupby([period, key]).last()
-    else:
-        date = pd.Series(r.index.tz_localize(None).normalize(), index=r.index, name="period")
-        d = (1 + r["ret"]).groupby([date, key]).prod() - 1
-    d = d[d.abs() <= MAX_ABS_RET]
+        return r.pivot(index="period", columns="key", values="ret")
+    d = (1 + r["ret"]).groupby([r["date"].rename("period"), r["key"]]).prod() - 1
     return d.unstack("key")
 
 
-def test_portfolios(B: pd.DataFrame, tilts: pd.DataFrame, rng, n_random: int) -> dict[str, pd.Series]:
+def test_portfolios(B: pd.DataFrame, tilts: pd.DataFrame, sectors: list[str], rng,
+                    n_random: int) -> dict[str, pd.Series]:
     """Weight vectors on B.index. Long-short books are demeaned and scaled to unit gross.
 
     `tilts` carries ALL 13 cluster composites, including ones dropped from the factor set.
@@ -84,6 +88,12 @@ def test_portfolios(B: pd.DataFrame, tilts: pd.DataFrame, rng, n_random: int) ->
         if g > 0:
             books[f"style tilt: {s}"] = w / g
 
+    for s in sectors:                      # long the sector (cap-weighted), short the index
+        inside = B[s] > 0
+        if inside.sum() >= 5:
+            w = (B["me"] * inside) / (B["me"] * inside).sum() - cap
+            books[f"sector tilt: {s}"] = w / w.abs().sum()
+
     for i in range(n_random):
         w = pd.Series(rng.standard_normal(len(idx)), index=idx)
         w = w - w.mean()
@@ -97,7 +107,13 @@ def main():
     p.add_argument("--every", type=int, default=5, help="test every Nth period (1 = every one)")
     p.add_argument("--n-random", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--halflife", type=float, default=None, help="EWMA halflife in DAYS (default: model.py)")
+    p.add_argument("--halflife", type=float, default=None,
+                   help="EWMA halflife in trading DAYS for the factor covariance (default: model.py)")
+    p.add_argument("--spec-halflife", type=float, default=None,
+                   help="EWMA halflife in trading DAYS for specific variance (default: model.py)")
+    p.add_argument("--start", default=None, help="first test date (default: after the warm-up)")
+    p.add_argument("--end", default=None,
+                   help="last test date. Set it to the last training day when tuning parameters.")
     p.add_argument("--horizon-bars", type=int, default=1,
                    help="bars the position is held. 1 = the hourly holding period; 7 = one "
                         "trading day, the horizon the alpha models forecast over. Test points "
@@ -110,9 +126,13 @@ def main():
     rng = np.random.default_rng(a.seed)
 
     R = returns_wide(a.freq)
-    warm = WARMUP * (7 if a.freq == "hourly" else 1)
+    warm = WARMUP * BARS_PER_DAY[a.freq]
     f_dates = model._factor_returns(a.freq).index
     dates = [d for d in f_dates[warm:] if d in R.index]
+    if a.start:
+        dates = [d for d in dates if d >= pd.Timestamp(a.start)]
+    if a.end:
+        dates = [d for d in dates if d < pd.Timestamp(a.end) + pd.Timedelta(1, unit="D")]
     test_dates = dates[::a.every]
     print(f"bias test ({a.freq}) on {len(test_dates):,} periods, {test_dates[0]} -> {test_dates[-1]} "
           f"(every {a.every})")
@@ -120,12 +140,13 @@ def main():
     styles = model.style_columns()
     names = model.factor_names(a.freq)
     in_model = [c for c in styles if c in names]
+    sectors = [c for c in names if c not in styles and c != "market"]
     print(f"styles in the factor model: {len(in_model)} ({', '.join(in_model)})")
-    print(f"also testing tilts on {len(styles) - len(in_model)} dropped composites: "
-          f"{', '.join(c for c in styles if c not in names)}")
-    raw = pd.read_parquet(RM_DIR / "exposures.parquet")
-    raw["eom"] = pd.to_datetime(raw["eom"])
-    raw["key"] = norm_ticker(raw["ticker"].fillna(""))
+    print(f"sector factors: {len(sectors)} ({', '.join(sectors)})")
+    dropped = [c for c in styles if c not in names]
+    if dropped:
+        print(f"also testing tilts on {len(dropped)} dropped composites: {', '.join(dropped)}")
+    raw = model._exposures()
     rows = []
     for t in test_dates:
         fwd = R.index[R.index > t][:a.horizon_bars]
@@ -139,12 +160,12 @@ def main():
             if a.horizon_bars == 1:
                 S = model.cov(t, freq=a.freq, target_hour=th, halflife_days=a.halflife).to_numpy()
                 D = model.specific_var(t, freq=a.freq, target_hour=th, index=B.index,
-                                       halflife_days=a.halflife).to_numpy()
+                                       halflife_days=a.spec_halflife).to_numpy()
             else:   # position held several bars: sum each bar's own covariance
                 S = model.cov_span(t, a.horizon_bars, freq=a.freq,
                                    halflife_days=a.halflife).to_numpy()
                 D = model.specific_var_span(t, a.horizon_bars, freq=a.freq, index=B.index,
-                                            halflife_days=a.halflife).to_numpy()
+                                            halflife_days=a.spec_halflife).to_numpy()
         except ValueError:
             continue
 
@@ -158,7 +179,7 @@ def main():
 
         tilts = (raw[raw["eom"] == B.attrs["eom"]].drop_duplicates("key", keep="first")
                  .set_index("key")[styles].reindex(B.index).astype(float).fillna(0.0))
-        for label, w in test_portfolios(B, tilts, rng, a.n_random).items():
+        for label, w in test_portfolios(B, tilts, sectors, rng, a.n_random).items():
             wv = w.to_numpy(float).copy()
             wv[~have] = 0.0                                   # only hold what trades tomorrow
             gross = np.abs(wv).sum()
@@ -190,16 +211,20 @@ def main():
                           "mean_z": g["z"].mean(), "kurtosis_z": g["z"].kurtosis()})
 
     out = z.groupby("portfolio").apply(summarize, include_groups=False)
+
     def grp(s):
         if s.startswith("random"):
             return "random"
+        if s.startswith("sector tilt"):
+            return "sector tilt"
         if s.startswith("style tilt"):
             return "style tilt (in model)" if s.replace("style tilt: ", "") in names else "style tilt (DROPPED)"
         return "index/active"
     out["group"] = [grp(s) for s in out.index]
     out = out.sort_values(["group", "portfolio"])
     tag = a.freq + (f"_h{a.horizon_bars}" if a.horizon_bars != 1 else "") \
-          + (f"_hl{a.halflife:g}" if a.halflife else "")
+          + (f"_hl{a.halflife:g}" if a.halflife else "") + (f"_shl{a.spec_halflife:g}" if a.spec_halflife else "") \
+          + (f"_to{pd.Timestamp(a.end):%Y%m%d}" if a.end else "")
     out.to_csv(Path(a.out) / f"bias_test_{tag}.csv")
 
     pd.set_option("display.width", 200)
@@ -209,11 +234,12 @@ def main():
         print(sub[["n", "bias_stat", "ci_low", "ci_high", "within_ci",
                    "mean_pred_vol_bp", "realized_vol_bp"]].round(3).to_string())
         print()
-    overall = z["z"].std(ddof=1)
-    ci = 2 * np.sqrt(1 / (2 * len(z)))
-    print(f"OVERALL bias statistic {overall:.3f}  (95% band {1 - ci:.3f}-{1 + ci:.3f}, n={len(z):,})")
-    print(f"  passing portfolios: {int(out['within_ci'].sum())} of {len(out)}")
-    print("  B>1 understates risk, B<1 overstates it, B~1 is correct")
+    by_group = out.groupby("group")["bias_stat"].agg(["mean", "min", "max"]).round(3)
+    print("bias statistic by group:\n" + by_group.to_string() + "\n")
+    print(f"passing portfolios: {int(out['within_ci'].sum())} of {len(out)}")
+    print(f"mean |B - 1| across portfolios: {(out['bias_stat'] - 1).abs().mean():.3f}   "
+          f"(pooled over all portfolios: {z['z'].std(ddof=1):.3f} - correlated books, errors can cancel)")
+    print("B>1 understates risk, B<1 overstates it, B~1 is correct")
 
 
 if __name__ == "__main__":

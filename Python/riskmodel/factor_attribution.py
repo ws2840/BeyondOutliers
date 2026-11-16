@@ -104,6 +104,8 @@ def main():
               else meta.index.tolist())
     cols = ["permno", "eom", "me", "gics", "ret_exc_lead1m"]
     panel = pd.read_parquet(ALL_PATH, columns=list(dict.fromkeys(cols + styles)))
+    # WRDS columns arrive as pandas nullable Float64; numpy linear algebra needs plain floats
+    panel = panel.astype({c: "float64" for c in panel.columns if str(panel[c].dtype) == "Float64"})
     panel["eom"] = pd.to_datetime(panel["eom"])
     panel = panel[panel["permno"].notna() & (panel["me"] > 0) & panel["ret_exc_lead1m"].notna()]
     panel["permno"] = panel["permno"].astype(int)
@@ -137,7 +139,8 @@ def main():
         A = np.column_stack(parts)
         if len(g) < 3 * A.shape[1]:
             continue
-        sw = np.sqrt(g["me"].values)
+        v = np.sqrt(g["me"].values.astype(float))       # WLS weights sqrt(me), scaled to mean 1
+        sw = np.sqrt(v / v.mean())                      # rows are multiplied by the root of the weight
         Aw, yw = A * sw[:, None], g["ret_exc_lead1m"].values * sw
         P = np.eye(A.shape[1]) * a.ridge
         P[0, 0] = 0
@@ -214,10 +217,13 @@ def main():
     show = tbl.copy()
     show["Contribution"] = show["Contribution"].map(pct)
     show["Realized Risk"] = show["Realized Risk"].map(pct)
-    with pd.ExcelWriter(out / "attribution.xlsx") as xw:
-        show.to_excel(xw, sheet_name="attribution_table", index=False)
-        rank.to_excel(xw, sheet_name="style_ranking")
-        m.to_excel(xw, sheet_name="monthly")
+    try:                                                # the CSVs above are the outputs; Excel is a convenience
+        with pd.ExcelWriter(out / "attribution.xlsx") as xw:
+            show.to_excel(xw, sheet_name="attribution_table", index=False)
+            rank.to_excel(xw, sheet_name="style_ranking")
+            m.to_excel(xw, sheet_name="monthly")
+    except ImportError:
+        print("attribution.xlsx not written: `pip install openpyxl` to get the Excel copy (CSVs are complete)")
     label = "DEMO equal-weight vs cap-weight" if wt is None else a.weights
     print(f"\nFactor-based performance attribution ({label}, excess returns)\n")
     print(show.to_string(index=False))

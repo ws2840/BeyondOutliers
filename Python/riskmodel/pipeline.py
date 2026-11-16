@@ -7,19 +7,22 @@ Build the whole risk model with one command.
     python Python/riskmodel/pipeline.py --validate      # also run the bias test
     python Python/riskmodel/pipeline.py --dry-run       # just print what would run
 
-The steps must run in order; each consumes the previous one's output. See
-data/riskmodel/README.md for what each file is.
+The steps must run in order; each consumes the previous one's output. Outputs go to
+data/riskmodel/; each script's docstring says what its files hold, and
+notebooks/risk_model_method.qmd walks through the method.
 
     1 exposures       data/jkp/all.parquet          -> exposures.parquet
     2 factor_returns  + data/returns/1h_bar.parquet -> factor_returns_hourly, residuals_hourly,
                                                        factor_returns_halfA/B_hourly
-    3 coverage        + the above                   -> exposures_covered, residuals_covered
+    3 coverage        + the above                   -> exposures_covered, residuals_covered,
+                                                       factor_returns_stage2[_halfA/B]_hourly
     4 alpha_target    residuals_*                   -> alpha_target_1d.parquet
     5 bias_test       (validation, optional)        -> bias_test_hourly.csv
 
 Prerequisites, produced by Python/market_data/ (see data/jkp/README.md):
     data/jkp/all.parquet          global_factor_download.py   (needs WRDS)
     data/jkp/reduced.parquet      global_factor_reduce.py     (for the permno->ticker map)
+    data/jkp/permno_ticker.csv    global_factor_download.py   (to detect ticker hand-overs)
     data/returns/1h_bar.parquet   return.py                   (needs Databento)
 """
 import argparse
@@ -36,7 +39,7 @@ STEPS = [
     ("factor_returns", ["factor_returns.py", "--freq", "hourly",
                         "--min-abs-t", "0"],                        "one cross-sectional regression per bar (f, u)"),
     ("coverage",       ["coverage.py"],                             "extend B and residuals to 100% of the index"),
-    ("alpha_target",   ["alpha_target.py"],                         "sum 7 bars -> 1-day forecast target"),
+    ("alpha_target",   ["alpha_target.py"],                         "sum one trading day of residuals -> forecast target"),
 ]
 VALIDATE = ("bias_test", ["bias_test.py", "--freq", "hourly", "--every", "30"],
             "validate: predicted vs realised risk")
@@ -91,7 +94,7 @@ def main():
 
     if not a.dry_run:
         print(f"pipeline complete in {time.time() - t0:.0f}s")
-        print("outputs in data/riskmodel/ — see its README.md")
+        print("outputs in data/riskmodel/ — each script's docstring describes its files")
     return 0
 
 

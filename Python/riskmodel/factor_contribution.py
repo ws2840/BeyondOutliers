@@ -21,7 +21,8 @@ Ranking: |RC_k| (and % of total active risk); '>5%' flags the paper's significan
 Also writes a portfolio-free ranking (factor_importance.csv): factor volatility per 1-sd
 exposure, mean |t| of the cross-sectional regressions, % of months with |t| > 2.
 
-Inputs : data/jkp/all.parquet (or reduced.parquet with --factors-from reduced)
+Inputs : data/jkp/all.parquet (--factors-from reduced uses only the 20 picked factors from it);
+         data/jkp/reduced.parquet for the permno -> ticker labels
          optional --weights CSV with columns permno, weight (portfolio) [, bmk_weight]
          default portfolio (demo): equal-weight universe vs cap-weight benchmark
 Outputs: data/jkp/contribution/*.csv and factor_contribution.xlsx
@@ -39,7 +40,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from market_data.global_factor_common import ALL_PATH, JKP_DIR, PICKED_PATH, load_meta  # noqa: E402
+from market_data.global_factor_common import ALL_PATH, JKP_DIR, PICKED_PATH, REDUCED_PATH, load_meta  # noqa: E402
 
 ANN = 12  # monthly model
 
@@ -80,14 +81,16 @@ def cross_sectional_regressions(panel, factors, ridge):
         if ok.sum() < 3 * (len(factors) + 1):
             continue
         A = np.column_stack([np.ones(ok.sum()), X.values[ok]])
-        w = np.sqrt(g["me"].values[ok])
+        v = np.sqrt(g["me"].values[ok].astype(float))   # WLS weights sqrt(me), scaled to mean 1
+        v = v / v.mean()
+        w = np.sqrt(v)                                  # rows are multiplied by the root of the weight
         Aw, yw = A * w[:, None], y.values[ok] * w
         P = np.eye(A.shape[1]) * ridge
         P[0, 0] = 0  # don't shrink the market intercept
         XtX_inv = np.linalg.inv(Aw.T @ Aw + P)
         b = XtX_inv @ Aw.T @ yw
         e = y.values[ok] - A @ b
-        s2 = (w * e) @ (w * e) / (ok.sum() - A.shape[1])
+        s2 = (v * e) @ e / (ok.sum() - A.shape[1])
         se = np.sqrt(np.diag(XtX_inv) * s2)
         date = eom + pd.offsets.MonthEnd(1)  # return month
         f_rows.append(pd.Series(b, index=["market"] + factors, name=date))
@@ -131,11 +134,20 @@ def main():
     meta = load_meta().set_index("factor")
     factors = (pd.read_csv(PICKED_PATH)["factor"].tolist() if a.factors_from == "reduced"
                else meta.index.tolist())
-    cols = ["permno", "eom", "me", "ret_exc_lead1m", "ticker"]
+    cols = ["permno", "eom", "me", "ret_exc_lead1m"]
     panel = pd.read_parquet(ALL_PATH, columns=list(dict.fromkeys(cols + factors)))
+    # WRDS columns arrive as pandas nullable Float64; numpy linear algebra needs plain floats
+    panel = panel.astype({c: "float64" for c in panel.columns if str(panel[c].dtype) == "Float64"})
     panel["eom"] = pd.to_datetime(panel["eom"])
     panel = panel[panel["permno"].notna()]
     panel["permno"] = panel["permno"].astype(int)
+    # all.parquet has no ticker column; the reduce step attached CRSP tickers to reduced.parquet
+    panel["ticker"] = None
+    if REDUCED_PATH.exists():
+        tick = pd.read_parquet(REDUCED_PATH, columns=["permno", "eom", "ticker"]).dropna(subset=["permno"])
+        tick["eom"], tick["permno"] = pd.to_datetime(tick["eom"]), tick["permno"].astype(int)
+        panel = panel.drop(columns="ticker").merge(tick.drop_duplicates(["permno", "eom"]),
+                                                   on=["permno", "eom"], how="left")
 
     # ---- estimate the model
     f, tstat, resid, expos = cross_sectional_regressions(panel, factors, a.ridge)
@@ -215,12 +227,15 @@ def main():
                   f"{100 * fac_sig**2 / sigma**2:.1f}%", int(rank["significant_gt_5pct"].sum()), round(shrink, 3)],
     })
     summary.to_csv(out / "summary.csv", index=False)
-    with pd.ExcelWriter(out / "factor_contribution.xlsx") as xw:
-        summary.to_excel(xw, sheet_name="summary", index=False)
-        rank.to_excel(xw, sheet_name="risk_contribution_ranking")
-        asset_tbl.head(a.top_assets).to_excel(xw, sheet_name="top_assets")
-        imp.to_excel(xw, sheet_name="factor_importance")
-        f.to_excel(xw, sheet_name="factor_returns")
+    try:                                                # the CSVs above are the outputs; Excel is a convenience
+        with pd.ExcelWriter(out / "factor_contribution.xlsx") as xw:
+            summary.to_excel(xw, sheet_name="summary", index=False)
+            rank.to_excel(xw, sheet_name="risk_contribution_ranking")
+            asset_tbl.head(a.top_assets).to_excel(xw, sheet_name="top_assets")
+            imp.to_excel(xw, sheet_name="factor_importance")
+            f.to_excel(xw, sheet_name="factor_returns")
+    except ImportError:
+        print("factor_contribution.xlsx not written: `pip install openpyxl` to get the Excel copy (CSVs are complete)")
 
     print(summary.to_string(index=False))
     print("\nTop 15 factors by |risk contribution|:")

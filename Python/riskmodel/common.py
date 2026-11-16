@@ -3,17 +3,22 @@
 Everything here was previously copy-pasted across the pipeline scripts (norm_ticker alone
 existed in six places). One definition means one place to change it.
 
-Pipeline, in order — see pipeline.py to run it all, or data/riskmodel/README.md:
+Pipeline, in order — see pipeline.py to run it all:
 
     exposures.py      153 JKP characteristics -> 13 cluster composites + sector   (B)
     factor_returns.py one cross-sectional regression per bar                      (f, u)
-    coverage.py       extends B and residuals to 100% of the index                (tiers 2-3)
-    alpha_target.py   sums 7 bars of residuals into the 1-day forecast target
+    coverage.py       extends B, f and residuals to 100% of the index             (tiers 2-3)
+    alpha_target.py   sums one trading day of residuals into the forecast target
     model.py          serves exposures() / cov() / specific_var() to the optimizer
     bias_test.py      validates the whole thing
+
+IDENTITY. Every table is joined on `key`, the normalized ticker the book trades under
+(Databento BRK.B -> BRKB). exposures.py resolves each JKP row to that key once, so no later
+step has to guess between CRSP's ticker (BRK) and ticker + share class (BRKB).
 """
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]          # repo root (contains data/ and Python/)
@@ -23,17 +28,24 @@ RETURNS_PATH = DATA_DIR / "returns" / "1h_bar.parquet"
 UNIVERSE_DIR = DATA_DIR / "universe"
 INSTRUMENT_PATH = UNIVERSE_DIR / "sp500_instrument.csv"
 MEMBERSHIP_PATH = UNIVERSE_DIR / "sp500_universe_early_end.csv"
+TICKER_MAP_PATH = DATA_DIR / "jkp" / "permno_ticker.csv"   # CRSP stocknames: permno -> ticker by date
 
 # Non-factor columns of exposures.parquet / exposures_covered.parquet.
-ID_COLS = ["permno", "eom", "ticker", "ticker_cls", "me", "in_sp500", "sector", "tier", "n_bars"]
+ID_COLS = ["permno", "eom", "ticker", "ticker_cls", "key", "me", "in_sp500", "sector",
+           "sector_model", "tier", "n_bars"]
 
 TRADING_HOURS = [10, 11, 12, 13, 14, 15, 16]        # bar ENDS; the 11:00 bar covers 10:00-11:00
 BARS_PER_DAY = {"hourly": len(TRADING_HOURS), "daily": 1}
 TRADING_DAYS = 252
 BARS_PER_YEAR = TRADING_DAYS * len(TRADING_HOURS)
 
-MAX_ABS_RET = 0.5        # a daily/hourly return beyond this is a ticker-reuse artifact, not a move
+MAX_ABS_RET = 2.0        # data-error guard only. Real moves are kept (FANG -52% on 2020-03-09,
+                         # MRNA +110% on 2026-08-19); ticker-reuse artifacts are removed by
+                         # date, see ticker_reuse_dates().
 MAX_STALE_DAYS = 45      # never reuse month-end exposures for longer than this
+MIN_SECTOR = 10          # a sector with fewer estimation stocks at month-end has no factor of its own
+THIN_BAR_FRAC = 0.9      # a bar with fewer stocks than this share of the day's fullest bar is
+                         # after-hours prints on a half day, not a trading bar
 
 GICS_SECTORS = {10: "Energy", 15: "Materials", 20: "Industrials", 25: "Consumer Discretionary",
                 30: "Consumer Staples", 35: "Health Care", 40: "Financials",
@@ -52,4 +64,94 @@ def norm_ticker(s) -> pd.Series:
 
 def style_columns(df) -> list[str]:
     """The style composite columns of an exposures frame."""
-    return [c for c in df.columns if c not in ID_COLS + ["key"]]
+    return [c for c in df.columns if c not in ID_COLS]
+
+
+def ticker_reuse_dates(path: Path = TICKER_MAP_PATH, max_gap_days: int = 7) -> pd.DataFrame:
+    """Dates on which a ticker passed from one company to another (key, date).
+
+    On 2020-03-02 Ingersoll-Rand plc became TT and Gardner Denver took the ticker IR the same
+    day, so the "return" of IR over that weekend is -75%: the price of one company divided by
+    the price of another. A size filter cannot tell that apart from a real crash, so the
+    hand-over is detected from CRSP's name history instead: a company starts using a ticker
+    it never held, within `max_gap_days` of another company giving it up.
+
+    CRSP's name history has an end date (see the file); later hand-overs are not detected.
+    """
+    if not Path(path).exists():
+        return pd.DataFrame({"key": pd.Series(dtype=str), "date": pd.Series(dtype="datetime64[ns]")})
+    tm = pd.read_csv(path, parse_dates=["namedt", "nameenddt"])
+    cls = tm["shrcls"].fillna("").astype(str).str.strip() if "shrcls" in tm.columns else ""
+    tm["key"] = norm_ticker(tm["ticker"].astype(str) + cls).to_numpy()
+    spans = tm.groupby(["key", "permno"]).agg(first=("namedt", "min"), last=("nameenddt", "max")).reset_index()
+    out = []
+    for key, g in spans.groupby("key"):
+        if len(g) < 2:
+            continue
+        for row in g.itertuples():
+            others = g[g["permno"] != row.permno]
+            gap = (row.first - others["last"]).dt.days
+            if ((gap > 0) & (gap <= max_gap_days)).any():
+                out.append((key, row.first))
+    return pd.DataFrame(out, columns=["key", "date"])
+
+
+def load_hourly_returns(path: Path = RETURNS_PATH, verbose: bool = True) -> pd.DataFrame:
+    """Hourly stock returns, cleaned once for every step of the pipeline.
+
+    Columns: period (bar end, naive US/Eastern), date, hour, ticker (as traded), key, ret.
+
+    Three things are removed, each for a stated reason:
+      - the first bar after a ticker changes hands (ticker_reuse_dates), which is not a return;
+      - thin bars: on a half day the market closes at 13:00 but the file still carries
+        14:00-16:00 bars built from a few after-hours prints. Their returns are compounded
+        into the stock's next real bar, so no price move is lost;
+      - |ret| > MAX_ABS_RET, a guard against data errors.
+    """
+    r = pd.read_parquet(path)
+    period = r.index.tz_localize(None)
+    out = pd.DataFrame({"period": period, "date": period.normalize(), "hour": period.hour,
+                        "ticker": r["ticker"].to_numpy(), "ret": r["ret"].to_numpy(float)})
+    out["key"] = norm_ticker(out["ticker"]).to_numpy()
+    n0 = len(out)
+
+    # 1. ticker hand-overs: drop the stock's first bar on or after the hand-over date
+    reuse = ticker_reuse_dates()
+    n_reuse = 0
+    reuse = reuse[reuse["key"].isin(pd.unique(out["key"]))
+                  & (reuse["date"] >= out["date"].min()) & (reuse["date"] <= out["date"].max())]
+    if len(reuse):
+        drop = np.zeros(len(out), dtype=bool)
+        keys, dates, periods = out["key"].to_numpy(), out["date"].to_numpy(), out["period"].to_numpy()
+        for key, d in reuse.itertuples(index=False):
+            rows = np.flatnonzero(keys == key)
+            rows = rows[(dates[rows] >= np.datetime64(d)) & (dates[rows] <= np.datetime64(d + pd.Timedelta(7, unit="D")))]
+            if len(rows):
+                drop[rows[np.argmin(periods[rows])]] = True
+        n_reuse = int(drop.sum())
+        out = out[~drop]
+
+    # 2. thin bars: fold their returns into the stock's next full bar
+    n_bar = out.groupby("period")["key"].transform("size")
+    day_max = n_bar.groupby(out["date"]).transform("max")
+    thin = (n_bar < THIN_BAR_FRAC * day_max).to_numpy()
+    n_thin_bars = int(out.loc[thin, "period"].nunique())
+    if thin.any():
+        out = out.sort_values(["key", "period"], kind="stable").reset_index(drop=True)
+        n_bar = out.groupby("period")["key"].transform("size")
+        day_max = n_bar.groupby(out["date"]).transform("max")
+        kept = (n_bar >= THIN_BAR_FRAC * day_max).to_numpy()
+        # each row belongs to the block that ENDS at the stock's next kept bar
+        block = pd.Series(kept[::-1].astype(int)).groupby(out["key"].to_numpy()[::-1]).cumsum().to_numpy()[::-1]
+        logret = np.log1p(out["ret"].clip(lower=-0.999999))
+        out["ret"] = np.expm1(logret.groupby([out["key"], block]).transform("sum"))
+        out = out[kept]
+
+    # 3. data-error guard
+    bad = out["ret"].abs() > MAX_ABS_RET
+    out = out[~bad].sort_values(["period", "key"], kind="stable").reset_index(drop=True)
+    if verbose:
+        print(f"hourly returns: {len(out):,} of {n0:,} stock-bars kept "
+              f"({n_reuse} ticker hand-overs, {n_thin_bars} thin after-hours bars folded forward, "
+              f"{int(bad.sum())} beyond +-{MAX_ABS_RET:.0%})")
+    return out[["period", "date", "hour", "ticker", "key", "ret"]]
