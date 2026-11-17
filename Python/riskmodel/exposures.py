@@ -119,22 +119,26 @@ def attach_sector(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
 def sp500_key(df: pd.DataFrame) -> pd.Series:
     """The S&P 500 member each row is at eom, as a normalized ticker; "" if it is not one.
 
-    A row is tried under ticker + share class first (BRK + B -> BRKB), then under the bare
-    ticker, so a class-specific listing wins over the bare ticker.
+    A row is matched under its bare CRSP ticker. Ticker + share class (BRK + B -> BRKB) is tried
+    only against members that are themselves written with a class (BRK.B, BF.B). Without that
+    restriction the concatenation invents matches: Mastercard is ticker MA, class A, and "MAA"
+    is Mid-America Apartment; Pluralsight is PS, class A, and "PSA" is Public Storage.
     """
     out = pd.Series("", index=df.index, dtype=object)
     if not MEMBERSHIP_PATH.exists() or "ticker" not in df.columns:
         return out
     m = pd.read_csv(MEMBERSHIP_PATH, parse_dates=["start_date", "end_date"])
     m["key"] = norm_ticker(m["ticker"])
+    m["has_class"] = m["ticker"].astype(str).str.contains(r"[.\-/]", regex=True)
     cand = [pd.DataFrame({"key": norm_ticker(df[c].fillna("")).to_numpy(), "eom": df["eom"].to_numpy(),
-                          "row": np.arange(len(df)), "prio": p})
-            for p, c in enumerate(("ticker_cls", "ticker")) if c in df.columns]
+                          "row": np.arange(len(df)), "with_class": c == "ticker_cls"})
+            for c in ("ticker", "ticker_cls") if c in df.columns]
     x = pd.concat(cand)
     x = x[x["key"] != ""]
-    j = x.merge(m[["key", "start_date", "end_date"]], on="key", how="inner")
+    j = x.merge(m[["key", "start_date", "end_date", "has_class"]], on="key", how="inner")
     j = j[(j["start_date"] <= j["eom"]) & (j["end_date"].isna() | (j["end_date"] > j["eom"]))]
-    j = j.sort_values(["row", "prio"]).drop_duplicates("row", keep="first")
+    j = j[j["with_class"] == j["has_class"]]             # bare ticker <-> plain member, ticker+class <-> classed member
+    j = j.sort_values(["row", "with_class"]).drop_duplicates("row", keep="first")
     out.iloc[j["row"].to_numpy()] = j["key"].to_numpy()
     return out
 

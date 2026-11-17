@@ -47,6 +47,9 @@ MAX_ABS_RET = 2.0        # data-error guard only. Real moves are kept (FANG -52%
                          # MRNA +110% on 2026-08-19); ticker-reuse artifacts are removed by
                          # date, see ticker_reuse_dates().
 MAX_STALE_DAYS = 45      # never reuse month-end exposures for longer than this
+END_DATE = pd.Timestamp("2025-12-31")   # last date used anywhere in the model: the last month-end JKP
+                         # has characteristics for. Later bars exist in the returns file but are
+                         # ignored (team decision); move this when newer JKP data is downloaded.
 MIN_SECTOR = 10          # a sector with fewer estimation stocks at month-end has no factor of its own
 THIN_BAR_FRAC = 0.9      # a bar with fewer stocks than this share of the day's fullest bar is
                          # after-hours prints on a half day, not a trading bar
@@ -100,8 +103,10 @@ def ticker_reuse_dates(path: Path = TICKER_MAP_PATH, max_gap_days: int = 7) -> p
         return pd.DataFrame({"key": pd.Series(dtype=str), "date": pd.Series(dtype="datetime64[ns]")})
     tm = pd.read_csv(path, parse_dates=["namedt", "nameenddt"])
     cls = tm["shrcls"].fillna("").astype(str).str.strip() if "shrcls" in tm.columns else ""
-    tm["key"] = norm_ticker(tm["ticker"].astype(str) + cls).to_numpy()
-    spans = tm.groupby(["key", "permno"]).agg(first=("namedt", "min"), last=("nameenddt", "max")).reset_index()
+    # a stock trades under its bare ticker (FOXA) or ticker + class (BRK + B); follow both spellings
+    both = pd.concat([tm.assign(key=norm_ticker(tm["ticker"].astype(str)).to_numpy()),
+                      tm.assign(key=norm_ticker(tm["ticker"].astype(str) + cls).to_numpy())]).drop_duplicates()
+    spans = both.groupby(["key", "permno"]).agg(first=("namedt", "min"), last=("nameenddt", "max")).reset_index()
     out = []
     for key, g in spans.groupby("key"):
         if len(g) < 2:
@@ -119,7 +124,7 @@ def load_hourly_returns(path: Path = RETURNS_PATH, verbose: bool = True) -> pd.D
 
     Columns: period (bar end, naive US/Eastern), date, hour, ticker (as traded), key, ret.
 
-    Three things are removed, each for a stated reason:
+    Bars after END_DATE are not loaded at all. Then three things are removed, each for a stated reason:
       - the first bar after a ticker changes hands (ticker_reuse_dates), which is not a return;
       - thin bars: on a half day the market closes at 13:00 but the file still carries
         14:00-16:00 bars built from a few after-hours prints. A bar is thin when it holds
@@ -133,6 +138,7 @@ def load_hourly_returns(path: Path = RETURNS_PATH, verbose: bool = True) -> pd.D
     out = pd.DataFrame({"period": period, "date": period.normalize(), "hour": period.hour,
                         "ticker": r["ticker"].to_numpy(), "ret": r["ret"].to_numpy(float)})
     out["key"] = norm_ticker(out["ticker"]).to_numpy()
+    out = out[out["date"] <= END_DATE]                  # nothing after the last date with JKP data
     n0 = len(out)
 
     # 1. ticker hand-overs: drop the stock's first bar on or after the hand-over date

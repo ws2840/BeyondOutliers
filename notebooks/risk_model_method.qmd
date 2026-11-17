@@ -515,7 +515,7 @@ changed, it had been computed with data from after $T$.
 | Served model at 5 decision times: exposures, factor covariance (next bar, holding period, one day), specific variance | 75,264 | yes |
 | **Total** | **32,426,135** | **yes** |
 
-: Truncation test on the code in this version of the repository. {tbl-colwidths="[62,22,16]"}
+: Truncation test, run before the 2025-12-31 end date and the ticker-matching correction were added; it has not been repeated since. {tbl-colwidths="[62,22,16]"}
 
 The largest difference anywhere is below $10^{-17}$, i.e. floating-point noise. The test was
 repeated with $T$ = 2020-03-20 (11.5 million values) with the same result. It was run once as a
@@ -564,8 +564,9 @@ stock-months in a hundred early in the sample and almost none late. A historical
 
 ## 10. Known limits
 
-- **The model ends in mid-February 2026.** JKP characteristics stop at 2025-12-31 and exposures
-  older than 45 days are refused. Later bars have no exposures, residuals or targets.
+- **The model ends on 2025-12-31.** That is the last month-end JKP has characteristics for. The
+  returns file runs to November 2026, but by team decision later bars are ignored
+  (`END_DATE` in `common.py`); move it when newer JKP data is downloaded.
 - **The half-lives are only loosely pinned down.** On the training years alone (bias test through
   2024-11-10, 319 bars per portfolio), covariance half-lives of 5, 10, 21 and 42 days give a mean
   distance of the bias statistic from 1 of 0.060, 0.056, 0.056 and 0.058, and specific-variance
