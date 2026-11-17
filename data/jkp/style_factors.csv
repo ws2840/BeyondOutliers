@@ -1,0 +1,13 @@
+factor,rank,cluster,description,direction,closest_pc,coverage_sp500,vol_ann
+prc_highprc_252d,1,Momentum,Current price to high price over last year,1,2,0.998,0.2309
+ebitda_mev,2,Value,Ebitda-to-market enterprise value,1,1,0.991,0.2036
+betabab_1260d,3,Low Risk,Frazzini-Pedersen market beta,-1,2,0.984,0.2058
+ret_1_0,4,Short-Term Reversal,Short-term reversal,-1,7,1.0,0.149
+ret_12_7,5,Profit Growth,Price momentum t-12 to t-7,1,2,0.995,0.1346
+market_equity,6,Size,Market Equity,-1,2,1.0,0.1112
+sale_gr1,7,Investment,Sales Growth (1 year),-1,1,0.998,0.1364
+op_at,8,Quality,Operating profits-to-book assets,1,2,0.999,0.1033
+ret_6_1,9,Momentum,Price momentum t-6 to t-1,1,2,0.997,0.182
+rmax5_rvol_21d,10,Short-Term Reversal,Highest 5 days of return scaled by volatility,-1,10,0.998,0.088
+kz_index,11,Seasonality,Kaplan-Zingales index,1,2,0.929,0.0714
+opex_at,12,Quality,Operating leverage,1,11,0.999,0.068

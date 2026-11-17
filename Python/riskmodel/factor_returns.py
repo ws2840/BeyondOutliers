@@ -8,7 +8,7 @@ For each bar t, across the S&P 500 members with exposures:
 
     r      stock return over the bar (hourly, from data/returns/1h_bar.parquet), or the
            day's bars compounded with --freq daily
-    B      the 13 cluster style composites from exposures.py, taken at the latest month-end
+    B      the style exposures from exposures.py, taken at the latest month-end
            STRICTLY BEFORE t (so nothing from the future enters)
     S      sector dummies (`sector_model` from exposures.py), with factor returns constrained
            to cap-weighted sum zero, which makes the intercept f_mkt the market return
@@ -116,7 +116,7 @@ def join_exposures(ret: pd.DataFrame, exp: pd.DataFrame, styles: list[str]) -> p
 
 
 def design(g: pd.DataFrame, styles: list[str], use_sectors: bool):
-    """[market intercept | sector dummies (cap-weighted sum zero) | style composites].
+    """[market intercept | sector dummies (cap-weighted sum zero) | style exposures].
 
     Returns the design matrix A in the reduced basis the fit uses, and the matrix T that maps
     its coefficients to one return per named factor: f = T b, names = market, sectors, styles.
@@ -274,7 +274,7 @@ def main():
     exp = pd.read_parquet(EXPOSURES_PATH)
     styles = [c for c in exp.columns if c not in ID_COLS]
     exp["eom"] = pd.to_datetime(exp["eom"])
-    print(f"exposures: {len(styles)} style composites, {exp['eom'].nunique()} month-ends "
+    print(f"exposures: {len(styles)} style factors, {exp['eom'].nunique()} month-ends "
           f"({exp['eom'].min().date()} -> {exp['eom'].max().date()})")
 
     panel = join_exposures(load_returns(a.freq), exp, styles)

@@ -17,7 +17,8 @@ FREQUENCY. The book trades every hour, and the alpha models forecast from every 
 so the model is estimated per BAR. B stays monthly because the JKP characteristics are
 monthly data - sales growth does not change between 10:00 and 11:00.
 
-FACTORS. market (every stock 1) + one factor per sector + the 13 style composites. A stock's
+FACTORS. market (every stock 1) + one factor per sector + the style factors chosen by
+factor_selection.py. A stock's
 sector factor is its `sector_model` from exposures.py / coverage.py - exactly the dummy it
 carried when the factor returns were estimated, so B and Sigma_f describe the same factors.
 
@@ -61,22 +62,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `riskmodel.co
 sys.path.insert(0, str(Path(__file__).resolve().parent))      # resolves however this is run
 
 try:
-    from riskmodel.common import (RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, DECISION_HOURS,
-                                  BARS_PER_DAY, norm_ticker, members_on)
+    from riskmodel.common import (RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, BARS_PER_DAY, norm_ticker,
+                                  members_on, session_hours, next_session, is_decision_time, handover_dates)
 except ImportError:
-    from common import (RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, TRADING_HOURS, DECISION_HOURS,
-                        BARS_PER_DAY, norm_ticker, members_on)
+    from common import (RM_DIR, ID_COLS, MAX_STALE_DAYS, TRADING_DAYS, BARS_PER_DAY, norm_ticker,
+                        members_on, session_hours, next_session, is_decision_time, handover_dates)
 
 
-HALFLIFE_COV_DAYS = 10      # trading days. Checked on the training years only
-                            # (`bias_test.py --every 30 --end 2024-11-10 --halflife N`, 319 bars per
-                            # portfolio): 5 / 10 / 21 / 42 give a mean |B - 1| across the 48 test
-                            # portfolios of 0.060 / 0.056 / 0.056 / 0.058. The test cannot separate
-                            # them, so 10 is kept; it is not a tuned optimum.
-HALFLIFE_SPEC_DAYS = 126    # trading days. Same check with --spec-halflife: 42 / 63 / 126 / 252 give
-                            # 0.050 / 0.052 / 0.056 / 0.060 - shorter is marginally better, within noise.
-                            # (Both checks predate the point-in-time membership / sector changes and
-                            # have not been re-run since.)
+# How these were chosen. Every candidate was scored on the TRAINING years only (through
+# common.TRAIN_END) with `bias_test.py --holding --every 5 --end 2023-12-31`: the book's real holding
+# periods, 46 test portfolios, about 1,400 test periods each. The score is the mean |B - 1| per
+# portfolio and calendar year (lower is better; B is the bias statistic). Full table in
+# notebooks/risk_model_method.qmd.
+HALFLIFE_COV_DAYS = 10      # trading days, memory of the factor covariance. 5 / 7 / 10 / 15 / 21 / 42
+                            # score 0.066 / 0.069 / 0.072 / 0.077 / 0.083 / 0.100: short is better and
+                            # the short end is flat, so 10 is kept.
+HALFLIFE_SPEC_DAYS = 42     # trading days, memory of specific variance. 21 / 30 / 42 / 63 / 126 score
+                            # 0.055 / 0.056 / 0.057 / 0.061 / 0.072; 42 is the longest (least noisy)
+                            # value on the flat part. Was 126.
+HALFLIFE_CORR_DAYS = None   # trading days, a separate memory for the CORRELATIONS between factors
+                            # (Barra uses a long one). None = same as the covariance half-life.
+                            # Tested at 252 with volatility half-lives 10 / 21 / 42: 0.092 / 0.099 /
+                            # 0.113, worse than a single short memory, so it stays off.
+HALFLIFE_VRA_DAYS = None    # trading days, the volatility regime adjustment (Barra's VRA). None = off.
+                            # Tested at 5 and 10 on top of several half-lives: 0.101 - 0.123, worse.
+SPEC_SHRINK_Q = 0.0         # specific-risk shrinkage toward size peers (Barra's Bayesian shrinkage).
+                            # 0 = off. Tested at 0.1 and 0.3: 0.072 / 0.072, no gain, so it stays off.
+VOL_FLOOR = 0.1             # a short-memory variance may not fall below this share of the long-memory one
 MIN_SPEC_OBS = 60
 MIN_HOUR_OBS = 100          # bars of a given hour needed before trusting its own scale
 MIN_EIGEN_RATIO = 1e-3      # floor on Sigma_f's eigenvalues as a share of its largest, so the
@@ -169,10 +181,21 @@ def _residual_arrays(freq: str) -> dict:
     stamp = u["date"] if freq == "daily" else u["date"] + pd.to_timedelta(u["hour"], unit="h")
     stamp = stamp.to_numpy().astype("datetime64[ns]").astype("int64")
     order = np.argsort(stamp, kind="stable")
+    stamp = stamp[order]
     kcode, keys = pd.factorize(u["key"].to_numpy()[order])
     hcode, hours = pd.factorize(u["hour"].to_numpy()[order], sort=True)
-    return {"stamp": stamp[order], "kcode": kcode, "keys": pd.Index(keys), "hcode": hcode,
-            "hours": np.asarray(hours), "resid": u["resid"].to_numpy(float)[order]}
+    # When a ticker passes to a different company, the old company's residuals say nothing about
+    # the new one. `cut` is the time from which a row no longer describes the holder of its key.
+    cut = np.full(len(stamp), np.iinfo("int64").max)
+    code = {k: i for i, k in enumerate(keys)}
+    for key, dates in handover_dates().items():
+        if key in code:
+            rows = np.flatnonzero(kcode == code[key])
+            for d in dates:
+                d_ns = d.as_unit("ns").value
+                cut[rows[stamp[rows] < d_ns]] = np.minimum(cut[rows[stamp[rows] < d_ns]], d_ns)
+    return {"stamp": stamp, "kcode": kcode, "keys": pd.Index(keys), "hcode": hcode,
+            "hours": np.asarray(hours), "resid": u["resid"].to_numpy(float)[order], "cut": cut}
 
 
 def style_columns() -> list[str]:
@@ -273,9 +296,49 @@ def _standardize(x: pd.DataFrame, sd: pd.DataFrame) -> np.ndarray:
     return x.to_numpy(float) / np.where(scale > 0, scale, 1.0)
 
 
+def _regime_multiplier(Xa: np.ndarray, Xb: np.ndarray, halflife: float, vra_halflife: float) -> float:
+    """Volatility regime adjustment: how wrong the volatility forecasts have been lately, all factors pooled.
+
+    For every past bar, each factor's squared return is divided by the variance that was forecast
+    for it one bar earlier; the average of that ratio across factors is 1 when forecasts are
+    right. An exponentially weighted mean of it over the recent past is the multiplier applied
+    to every factor variance. One number estimated from all factors is far less noisy than
+    shortening every factor's own memory. (Xa * Xb is the noise-corrected squared return.)
+    """
+    prod = pd.DataFrame(Xa * Xb)
+    fcst = prod.ewm(halflife=halflife).mean().shift(1)
+    fcst = fcst.clip(lower=VOL_FLOOR * prod.mean().clip(lower=1e-300), axis=1)
+    ratio = (prod / fcst).iloc[min(100, len(prod) // 2):].mean(axis=1)
+    lam2 = ratio.ewm(halflife=vra_halflife).mean().iloc[-1]
+    return float(np.clip(lam2, 0.25, 4.0)) if np.isfinite(lam2) else 1.0
+
+
+def _vol_and_corr(Xa: np.ndarray, Xb: np.ndarray, halflife: float, corr_halflife: float,
+                  vra_halflife: float) -> np.ndarray:
+    """Covariance of (standardized) factor returns, with separate memories for its two parts.
+
+    Volatilities change within weeks; correlations among ~25 factors need years of bars to be
+    estimated at all. With corr_halflife set, the correlation matrix comes from the long window
+    and each factor's variance from the short one. With vra_halflife set, all variances are
+    then scaled by the regime multiplier. Xa, Xb are the two half-sample estimates (or the same
+    array twice when there are none).
+    """
+    C = _psd(_ewma_cross(Xa, Xb, halflife))
+    if corr_halflife and corr_halflife != halflife:
+        L = _psd(_ewma_cross(Xa, Xb, corr_halflife))
+        dl = np.diag(L)
+        M = _ewma_cross(Xa, Xb, halflife)
+        v = np.maximum(np.diag((M + M.T) / 2), VOL_FLOOR * dl)
+        C = L / np.sqrt(np.outer(dl, dl)) * np.sqrt(np.outer(v, v))
+    if vra_halflife:
+        C = C * _regime_multiplier(Xa, Xb, halflife, vra_halflife)
+    return C
+
+
 @lru_cache(maxsize=32)
 def _cov_core(when: pd.Timestamp, freq: str, halflife: float, hour_scaling: bool,
-              eiv_correct: bool, shrink: bool, min_obs: int):
+              eiv_correct: bool, shrink: bool, min_obs: int, corr_halflife: float = 0.0,
+              vra_halflife: float = 0.0):
     """Everything in cov() that does not depend on the hour being forecast.
 
     Returns (C, sd, columns, n_obs, shrinkage, eiv). With hour scaling, C is the covariance of
@@ -298,7 +361,7 @@ def _cov_core(when: pd.Timestamp, freq: str, halflife: float, hour_scaling: bool
         # Cov(f_A, f_B) removes estimation noise: both halves share the true factor return,
         # their estimation errors are independent, so the cross-covariance keeps only the signal.
         if not scaled:
-            C, sd = _psd(_ewma_cross(fa.to_numpy(float), fb.to_numpy(float), halflife)), None
+            C, sd = _vol_and_corr(fa.to_numpy(float), fb.to_numpy(float), halflife, corr_halflife, vra_halflife), None
         else:
             sh2 = {}
             for hh, idx in fa.groupby(fa.index.hour).groups.items():
@@ -308,15 +371,16 @@ def _cov_core(when: pd.Timestamp, freq: str, halflife: float, hour_scaling: bool
                 fa.to_numpy(float), fb.to_numpy(float), 1e18))), 0.0))
             sd = pd.DataFrame({hh: np.where(v > 0, np.sqrt(v), pooled) for hh, v in sh2.items()}).T
             sd.columns = cols
-            C = _psd(_ewma_cross(_standardize(fa, sd), _standardize(fb, sd), halflife))
+            C = _vol_and_corr(_standardize(fa, sd), _standardize(fb, sd), halflife, corr_halflife, vra_halflife)
     elif not scaled:
-        C, sd = _ewma_cov(hist.to_numpy(float), halflife), None
+        x = hist.to_numpy(float)
+        C, sd = _vol_and_corr(x, x, halflife, corr_halflife, vra_halflife), None
         if shrink:
             C, shrinkage = _ledoit_wolf_shrink(C, hist.to_numpy(float)[-min_obs:])
     else:
         sd = hour_scales(hist, freq)
         g = _standardize(hist, sd)                             # standardize each bar by its hour
-        C = _ewma_cov(g, halflife)
+        C = _vol_and_corr(g, g, halflife, corr_halflife, vra_halflife)
         if shrink:
             C, shrinkage = _ledoit_wolf_shrink(C, g[-min_obs:])
     return C, sd, cols, len(hist), shrinkage, halves is not None
@@ -324,8 +388,13 @@ def _cov_core(when: pd.Timestamp, freq: str, halflife: float, hour_scaling: bool
 
 def cov(when, freq: str = "hourly", horizon_bars: float = 1.0, target_hour: int | None = None,
         shrink: bool = True, min_obs: int = 252, hour_scaling: bool = True,
-        halflife_days: float | None = None, eiv_correct: bool = True) -> pd.DataFrame:
+        halflife_days: float | None = None, eiv_correct: bool = True,
+        corr_halflife_days: float | None = None, vra_halflife_days: float | None = None) -> pd.DataFrame:
     """Factor covariance using only history up to and including `when`.
+
+    `halflife_days` is the memory of the factor VOLATILITIES, `corr_halflife_days` that of the
+    correlations between factors, `vra_halflife_days` that of the regime adjustment; each
+    defaults to the module constant, and 0 switches the second or third off.
 
     `target_hour` is the bar being FORECAST. Standing at the 16:00 bar and forecasting the
     next one means forecasting tomorrow's 10:00 bar, which is ~2.6x more volatile - so the
@@ -338,8 +407,11 @@ def cov(when, freq: str = "hourly", horizon_bars: float = 1.0, target_hour: int 
     when = pd.Timestamp(when)
     halflife = (HALFLIFE_COV_DAYS if halflife_days is None else halflife_days) * BARS_PER_DAY[freq]
     h = _hour_of(when, freq) if target_hour is None else int(target_hour)
+    corr_hl = (HALFLIFE_CORR_DAYS if corr_halflife_days is None else corr_halflife_days) or 0.0
+    vra_hl = (HALFLIFE_VRA_DAYS if vra_halflife_days is None else vra_halflife_days) or 0.0
     C, sd, cols, n_obs, shrinkage, eiv = _cov_core(when, freq, float(halflife), bool(hour_scaling),
-                                                   bool(eiv_correct), bool(shrink), int(min_obs))
+                                                   bool(eiv_correct), bool(shrink), int(min_obs),
+                                                   float(corr_hl * BARS_PER_DAY[freq]), float(vra_hl * BARS_PER_DAY[freq]))
     if sd is None:
         S = C
     else:
@@ -373,7 +445,8 @@ def _spec_core(when: pd.Timestamp, freq: str, halflife_days: float, hour_scaling
     n = int(np.searchsorted(a["stamp"], now, side="right"))
     if n == 0:
         raise ValueError(f"no residuals on or before {when}")
-    resid, hcode, kcode = a["resid"][:n], a["hcode"][:n], a["kcode"][:n]
+    resid, hcode, kcode, stamp = a["resid"][:n], a["hcode"][:n], a["kcode"][:n], a["stamp"][:n]
+    current = (a["cut"][:n] > now).astype(float)         # 0 for a ticker's history from before it changed hands
     pooled = float(resid.std(ddof=1)) if n > 1 else 0.0
 
     by_hour = None
@@ -387,11 +460,11 @@ def _spec_core(when: pd.Timestamp, freq: str, halflife_days: float, hour_scaling
         by_hour = pd.Series(sd, index=a["hours"])
         resid = resid / sd[hcode]                              # standardized residuals
 
-    age = (now - a["stamp"][:n]) / 86400e9 * (TRADING_DAYS / CALENDAR_DAYS_PER_YEAR)   # trading days
-    w = 0.5 ** (age / halflife_days)
+    age = (now - stamp) / 86400e9 * (TRADING_DAYS / CALENDAR_DAYS_PER_YEAR)             # trading days
+    w = 0.5 ** (age / halflife_days) * current           # weight 0 removes those rows from the stock's own variance
     K = len(a["keys"])
     num, den = np.bincount(kcode, w * resid ** 2, minlength=K), np.bincount(kcode, w, minlength=K)
-    cnt_k = np.bincount(kcode, minlength=K)
+    cnt_k = np.bincount(kcode, current, minlength=K)
     with np.errstate(divide="ignore", invalid="ignore"):
         var = np.where(cnt_k >= MIN_SPEC_OBS, num / den, np.nan)
     return pd.Series(var, index=a["keys"])[cnt_k > 0], by_hour, pooled
@@ -399,20 +472,36 @@ def _spec_core(when: pd.Timestamp, freq: str, halflife_days: float, hour_scaling
 
 def specific_var(when, freq: str = "hourly", horizon_bars: float = 1.0, target_hour: int | None = None,
                  index: pd.Index | None = None, hour_scaling: bool = True,
-                 halflife_days: float | None = None) -> pd.Series:
+                 halflife_days: float | None = None, me: pd.Series | None = None,
+                 shrink_q: float | None = None) -> pd.Series:
     """Per-stock specific variance: standardized variance x the scale of the bar being forecast.
 
     `target_hour` works exactly as in cov() - the bar being predicted, not the one you stand on.
     A stock with too little history gets the median stock's variance.
+
+    With `me` (market cap, indexed like `index`) and a positive shrink_q, each stock's specific
+    volatility is pulled toward the average of the stocks in its size decile, the more so the
+    further it sits from that average: a stock's own estimate is partly noise, and the extreme
+    ones are the noisiest. Stocks without enough history then take their decile's average.
     """
     when = pd.Timestamp(when)
     h = _hour_of(when, freq) if target_hour is None else int(target_hour)
     hl_days = HALFLIFE_SPEC_DAYS if halflife_days is None else halflife_days
     var, by_hour, pooled = _spec_core(when, freq, float(hl_days), bool(hour_scaling))
     scale_h = 1.0 if by_hour is None else float(by_hour.get(h, pooled))
-    var = var.fillna(var.median()) * (scale_h ** 2) * horizon_bars
-    if index is not None:                      # B.index is already the normalized ticker key
-        var = var.reindex(index).fillna(var.median())
+    q = SPEC_SHRINK_Q if shrink_q is None else shrink_q
+    if q and me is not None and index is not None:
+        own = np.sqrt(var.reindex(index))                      # NaN where history is too short
+        size = pd.qcut(me.reindex(index).rank(method="first"), 10, labels=False)
+        peer, spread = own.groupby(size).transform("mean"), own.groupby(size).transform("std")
+        gap = (own - peer).abs()
+        w = (q * gap / (spread + q * gap)).fillna(1.0)         # no own estimate -> all weight on the peers
+        var = (w * peer + (1 - w) * own.fillna(peer)) ** 2
+        var = var.fillna(var.median()) * (scale_h ** 2) * horizon_bars
+    else:
+        var = var.fillna(var.median()) * (scale_h ** 2) * horizon_bars
+        if index is not None:                  # B.index is already the normalized ticker key
+            var = var.reindex(index).fillna(var.median())
     var.name = "specific_var"
     return var
 
@@ -426,24 +515,40 @@ def forward_hours(when, n_bars: int, freq: str = "hourly") -> list[int]:
     """
     if freq == "daily":
         return [-1] * n_bars
-    h0 = int(pd.Timestamp(when).hour)
-    i = TRADING_HOURS.index(h0) if h0 in TRADING_HOURS else -1
-    return [TRADING_HOURS[(i + 1 + k) % len(TRADING_HOURS)] for k in range(n_bars)]
+    return [t.hour for t in _forward_bars(when, n_bars)]
+
+
+def _forward_bars(when, n_bars: int) -> list[pd.Timestamp]:
+    """The next `n_bars` bar ends after `when`, following the trading calendar.
+
+    A half day has only the 10:00-13:00 bars, so the bar after 13:00 on such a day is the next
+    day's 10:00 bar - the overnight one. Assuming seven bars every day would hand a position
+    carried over that night the risk of an ordinary afternoon hour.
+    """
+    when = pd.Timestamp(when)
+    day, out = when.normalize(), []
+    hours = [h for h in session_hours(day) if h > when.hour]
+    while len(out) < n_bars:
+        out += [day + pd.Timedelta(h, unit="h") for h in hours][:n_bars - len(out)]
+        day = next_session(day)
+        hours = session_hours(day)
+    return out
 
 
 def holding_bars(when, freq: str = "hourly") -> int:
     """Bars a position taken at `when` is held before the book can trade again.
 
-    The book trades at DECISION_HOURS only (10:00 ... 15:00): not in the first half hour, not
-    in the last hour. So a position taken at 10:00-14:00 is held for 1 bar, and one taken at
+    The book trades at the decision times only (10:00 ... 15:00): not in the first half hour,
+    not in the last hour. So a position taken at 10:00-14:00 is held for 1 bar, and one taken at
     15:00 is held for 2 - the 16:00 bar and the next day's 10:00 bar, which carries the
-    overnight move. Use it as n_bars in cov_span() / specific_var_span() for the risk of the
-    holding period.
+    overnight move. On a half day the last decision time is 12:00, and a position taken then is
+    likewise held for 2 bars (13:00 and the next 10:00). Use it as n_bars in cov_span() /
+    specific_var_span() for the risk of the holding period.
     """
     if freq == "daily":
         return 1
     n = 1
-    while forward_hours(when, n, freq)[-1] not in DECISION_HOURS:
+    while not is_decision_time(_forward_bars(when, n)[-1]):
         n += 1
     return n
 
@@ -454,8 +559,10 @@ def cov_span(when, n_bars: int = 7, freq: str = "hourly", **kw) -> pd.DataFrame:
     Each bar has its own covariance (the 10:00 bar is ~2.6x the afternoon), so the horizon
     covariance is the SUM of the bars actually spanned, not a sqrt-of-time scaling of one bar.
     Scaling by sqrt(n) understates a one-day horizon by about 5% because it ignores that
-    variance is concentrated in the overnight bar. Factor returns are near-uncorrelated across
-    bars (|autocorrelation| < 0.06), so the cross-bar terms are dropped.
+    variance is concentrated in the overnight bar. The cross-bar terms are dropped: factor
+    returns in consecutive bars are only weakly correlated (|autocorrelation| < 0.06), and the
+    correlation that exists is slightly NEGATIVE, so the sum errs, if anything, on the cautious
+    side for the market factor.
 
     n_bars=1 is the holding period between hourly rebalances; n_bars=7 is one trading day,
     the horizon the alpha models forecast over.
@@ -498,7 +605,7 @@ def total_risk(weights: pd.Series, when, freq: str = "hourly", horizon_bars: int
     # be held through, never the bar just observed. cov_span handles n=1 as "the next bar".
     n = int(horizon_bars)
     S = cov_span(when, n, freq=freq).to_numpy()
-    D = specific_var_span(when, n, freq=freq, index=B.index).to_numpy()
+    D = specific_var_span(when, n, freq=freq, index=B.index, me=B["me"]).to_numpy()
     x = Bm.T @ w
     fac, spec = float(x @ S @ x), float((w ** 2) @ D)
     ann = np.sqrt(TRADING_DAYS * BARS_PER_DAY[freq] / horizon_bars)
@@ -525,7 +632,7 @@ def main():
         print(f"\n  risk of the cap-weighted index over the NEXT bar, standing at each bar of the day:")
         day = pd.Timestamp(when).normalize()
         cap = B["me"] / B["me"].sum()
-        for hour in TRADING_HOURS:
+        for hour in session_hours(day):
             t = day.replace(hour=hour)
             if t > _factor_returns(a.freq).index.max():
                 continue

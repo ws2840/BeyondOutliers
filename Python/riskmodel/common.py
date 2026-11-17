@@ -5,7 +5,8 @@ existed in six places). One definition means one place to change it.
 
 Pipeline, in order — see pipeline.py to run it all:
 
-    exposures.py      153 JKP characteristics -> 13 cluster composites + sector   (B)
+    factor_selection.py  which of the 153 JKP characteristics are the style factors
+    exposures.py      those characteristics, standardized, + sector               (B)
     factor_returns.py one cross-sectional regression per bar                      (f, u)
     coverage.py       extends B, f and residuals to 100% of the index             (tiers 2-3)
     alpha_target.py   sums one trading day of residuals into the forecast target
@@ -30,6 +31,8 @@ UNIVERSE_DIR = DATA_DIR / "universe"
 INSTRUMENT_PATH = UNIVERSE_DIR / "sp500_instrument.csv"
 MEMBERSHIP_PATH = UNIVERSE_DIR / "sp500_universe_early_end.csv"
 TICKER_MAP_PATH = DATA_DIR / "jkp" / "permno_ticker.csv"   # CRSP stocknames: permno -> ticker by date
+STYLE_PATH = DATA_DIR / "jkp" / "style_factors.csv"        # the chosen style factors (factor_selection.py)
+STYLE_PCA_PATH = DATA_DIR / "jkp" / "style_factors_pca.csv"  # the PCA table behind that choice
 
 # Non-factor columns of exposures.parquet / exposures_covered.parquet.
 ID_COLS = ["permno", "eom", "ticker", "ticker_cls", "key", "me", "in_sp500", "sector",
@@ -47,6 +50,9 @@ MAX_ABS_RET = 2.0        # data-error guard only. Real moves are kept (FANG -52%
                          # MRNA +110% on 2026-08-19); ticker-reuse artifacts are removed by
                          # date, see ticker_reuse_dates().
 MAX_STALE_DAYS = 45      # never reuse month-end exposures for longer than this
+TRAIN_END = pd.Timestamp("2023-12-31")  # choices made by LOOKING at data (which factors, and any
+                         # tuning) may use data up to here only. The two years after it are the
+                         # hidden test period. Agree this date with the team before relying on it.
 END_DATE = pd.Timestamp("2025-12-31")   # last date used anywhere in the model: the last month-end JKP
                          # has characteristics for. Later bars exist in the returns file but are
                          # ignored (team decision); move this when newer JKP data is downloaded.
@@ -83,8 +89,49 @@ def members_on(date) -> set:
     return set(m.loc[(m["start_date"] <= d) & (m["end_date"].isna() | (m["end_date"] > d)), "key"]) - {""}
 
 
+def is_half_day(date) -> bool:
+    """NYSE early closes (13:00): 3 July when 4 July falls Tuesday-Friday, the day after
+    Thanksgiving, and Christmas Eve on a weekday. Known in advance, so using it is not look-ahead."""
+    d = pd.Timestamp(date)
+    if d.weekday() > 4:
+        return False
+    return ((d.month == 7 and d.day == 3 and d.weekday() <= 3)
+            or (d.month == 12 and d.day == 24)
+            or (d.month == 11 and d.weekday() == 4 and 23 <= d.day <= 29))
+
+
+def session_hours(date) -> list[int]:
+    """The bars (by end hour) of a trading day: 10:00-16:00, or 10:00-13:00 on a half day."""
+    return TRADING_HOURS[:4] if is_half_day(date) else TRADING_HOURS
+
+
+def next_session(date) -> pd.Timestamp:
+    """The next trading day, as far as bar hours are concerned: the next weekday, skipping
+    Thanksgiving. Other holidays are not skipped - the day after one has the same seven bars,
+    so the sequence of bar HOURS is still right, which is all the model uses this for."""
+    d = pd.Timestamp(date).normalize() + pd.Timedelta(1, unit="D")
+    while d.weekday() > 4 or (d.month == 11 and d.weekday() == 3 and 22 <= d.day <= 28):
+        d += pd.Timedelta(1, unit="D")
+    return d
+
+
+def is_decision_time(when) -> bool:
+    """Can the book trade at this bar end? One of DECISION_HOURS, and not the day's close:
+    on a half day the last hour is 12:00-13:00, so the decision times are 10:00, 11:00, 12:00."""
+    t = pd.Timestamp(when)
+    return t.hour in DECISION_HOURS and t.hour < session_hours(t)[-1]
+
+
+def handover_dates() -> dict:
+    """key -> sorted dates on which that ticker passed to a different company (ticker_reuse_dates)."""
+    out = {}
+    for key, d in ticker_reuse_dates().itertuples(index=False):
+        out.setdefault(key, []).append(pd.Timestamp(d))
+    return {k: sorted(v) for k, v in out.items()}
+
+
 def style_columns(df) -> list[str]:
-    """The style composite columns of an exposures frame."""
+    """The style factor columns of an exposures frame."""
     return [c for c in df.columns if c not in ID_COLS]
 
 

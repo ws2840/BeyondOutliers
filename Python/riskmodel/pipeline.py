@@ -11,6 +11,7 @@ The steps must run in order; each consumes the previous one's output. Outputs go
 data/riskmodel/; each script's docstring says what its files hold, and
 notebooks/risk_model_method.qmd walks through the method.
 
+    0 factor_selection data/jkp/factor_returns_daily -> data/jkp/style_factors.csv (+ _pca.csv)
     1 exposures       data/jkp/all.parquet          -> exposures.parquet
     2 factor_returns  + data/returns/1h_bar.parquet -> factor_returns_hourly, residuals_hourly,
                                                        factor_returns_halfA/B_hourly
@@ -25,6 +26,7 @@ A separate check, run by hand after a build:
 Prerequisites, produced by Python/market_data/ (see data/jkp/README.md):
     data/jkp/all.parquet          global_factor_download.py   (needs WRDS)
     data/jkp/reduced.parquet      global_factor_reduce.py     (for the permno->ticker map)
+    data/jkp/factor_returns_daily.parquet  global_factor_returns.py  (public, for the factor choice)
     data/jkp/permno_ticker.csv    global_factor_download.py   (to detect ticker hand-overs)
     data/returns/1h_bar.parquet   return.py                   (needs Databento)
 """
@@ -38,18 +40,20 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
 STEPS = [
-    ("exposures",      ["exposures.py"],                            "153 characteristics -> 13 composites + sector (B)"),
+    ("factor_selection", ["factor_selection.py"],                   "choose the style factors from the 153 (PCA, training years)"),
+    ("exposures",      ["exposures.py"],                            "chosen characteristics, standardized, + sector (B)"),
     ("factor_returns", ["factor_returns.py", "--freq", "hourly",
                         "--min-abs-t", "0"],                        "one cross-sectional regression per bar (f, u)"),
     ("coverage",       ["coverage.py"],                             "extend B and residuals to 100% of the index"),
     ("alpha_target",   ["alpha_target.py"],                         "sum one trading day of residuals -> forecast target"),
 ]
-VALIDATE = ("bias_test", ["bias_test.py", "--freq", "hourly", "--every", "30"],
+VALIDATE = ("bias_test", ["bias_test.py", "--freq", "hourly", "--every", "3", "--save-z"],
             "validate: predicted vs realised risk")
 
 
 def check_inputs() -> list[str]:
     need = [ROOT / "data" / "jkp" / "all.parquet",
+            ROOT / "data" / "jkp" / "factor_returns_daily.parquet",
             ROOT / "data" / "jkp" / "reduced.parquet",
             ROOT / "data" / "returns" / "1h_bar.parquet"]
     return [str(p.relative_to(ROOT)) for p in need if not p.exists()]
