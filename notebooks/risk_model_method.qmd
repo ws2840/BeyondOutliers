@@ -1,13 +1,15 @@
 ---
-title: "Risk Model: Residual Returns and Covariance, Step by Step"
+title: "Risk Model: Goals, Method and Results"
+subtitle: "Residual returns and covariance for the S&P 500 hourly book, step by step"
 author: "Risk model team"
 date: today
 format:
   pdf:
     documentclass: article
-    fontsize: 11pt
-    geometry: margin=1in
-    toc: false
+    fontsize: 10.5pt
+    geometry: margin=0.95in
+    toc: true
+    toc-depth: 2
     number-sections: false
     include-in-header:
       text: \usepackage{needspace}
@@ -30,9 +32,11 @@ from IPython.display import Markdown
 ROOT = Path.cwd().parent
 sys.path.insert(0, str(ROOT / "Python"))
 from riskmodel import common, model  # noqa: E402
+from riskmodel import coverage as cov_mod, factor_returns as fr_mod  # noqa: E402
 
 RM = ROOT / "data" / "riskmodel"
 JKP = ROOT / "data" / "jkp"
+UNI = ROOT / "data" / "universe"
 plt.rcParams.update({"figure.figsize": (6.5, 2.8), "axes.grid": True, "grid.color": "0.9",
                      "axes.spines.top": False, "axes.spines.right": False, "lines.linewidth": 1})
 BLUE, GRAY, ORANGE = "#0072B2", "#B0B0B0", "#D55E00"
@@ -40,6 +44,16 @@ BLUE, GRAY, ORANGE = "#0072B2", "#B0B0B0", "#D55E00"
 
 def table(df: pd.DataFrame, digits: int = 2) -> Markdown:
     return Markdown(df.round(digits).to_markdown())
+
+
+def group_of(name: str) -> str:
+    if name.startswith("random"):
+        return "random long-short"
+    if name.startswith("sector"):
+        return "sector vs. index"
+    if name.startswith("style"):
+        return "style tilt"
+    return "index / active"
 
 
 meta = pd.read_csv(JKP / "factor_meta.csv")
@@ -50,17 +64,54 @@ names = model.factor_names("hourly")
 sectors = [n for n in names if n not in styles and n != "market"]
 last_bar = F.index.max()
 last_eom = exp["eom"].max()
+R = common.load_hourly_returns(verbose=False)
+U = model._residuals("hourly")
+TRAIN_END = common.TRAIN_END
+HL_BARS = model.HALFLIFE_COV_DAYS * 7
 ```
 
-This note explains how the two risk-model deliverables are built, in the order the code runs:
+# 1. Goals, and how each was met
 
-- the **residualized return** of every stock, which is the target the alpha models forecast;
-- the **covariance** of stock returns, which the optimizer uses to size positions.
+The risk model has two deliverables and three conditions.
 
-Everything is produced by one command, `python Python/riskmodel/pipeline.py --validate`, and every
-number below is read from its output in `data/riskmodel/`.
+**Deliverables**
 
-## 1. The model in one line
+1. **Residualized returns.** For every stock and every hourly bar, the part of the return that is
+   not explained by common factors. Summed over one trading day, this is the target all alpha
+   models forecast.
+2. **Covariance.** For every decision time, the covariance of stock returns over the period the
+   book will hold its positions. The optimizer uses it to size positions.
+
+**Conditions**
+
+3. **Similar to Barra.** A fundamental factor model: market, industry and style factors, with
+   style factors taken from original stock characteristics; factor returns from cross-sectional
+   regressions; a factor covariance and a specific risk built from those.
+4. **Point in time.** Every number used at time $t$ must be knowable at time $t$.
+5. **Fits the trading setup.** S&P 500 stocks, hourly bars, trades at 10:00, 11:00, 12:00, 13:00,
+   14:00 and 15:00 only, a 1-day forecast horizon.
+
+```{python}
+tgt = pd.read_parquet(RM / "alpha_target_1d.parquet", columns=["hour", "residual_fwd_1d", "raw_fwd_1d"])
+removed = 100 * (1 - tgt["residual_fwd_1d"].var() / tgt["raw_fwd_1d"].var())
+bt = pd.read_csv(RM / "bias_test_hourly.csv", index_col=0)
+hold = pd.read_csv(RM / "bias_test_hourly_holding.csv", index_col=0)
+Markdown(f"""
+| Goal | How it is met | Code | Evidence |
+|---|---|---|---|
+| 1. Residualized returns | One weighted cross-sectional regression per bar; the residual is the return minus exposures times factor returns; the 1-day target is the sum over the next trading day | `factor_returns.py`, `coverage.py`, `alpha_target.py` | Factors remove {removed:.0f}% of the variance of 1-day returns (section 8) |
+| 2. Covariance | $\\Sigma = B F B^\\top + D$: factor covariance from the history of factor returns, specific variance from each stock's residuals, both rescaled to the bar being forecast | `model.py` | Bias statistic within {100 * (bt['bias_stat'] - 1).abs().mean():.1f}% of 1 on average across {len(bt)} test portfolios (section 10) |
+| 3. Similar to Barra | Market + {len(sectors)} sector + {len(styles)} style factors; styles are original JKP characteristics chosen by PCA; regression weights, standardization and constraint as in Barra | `factor_selection.py`, `exposures.py` | Section 13 lists every difference |
+| 4. Point in time | Exposures from the month-end strictly before the date; covariance from bars up to the decision time; membership by date | all | Rebuilding from truncated data reproduces every number (section 12) |
+| 5. Trading setup | Per-bar model with hour-of-day scaling; decision times 10:00–15:00; holding periods include the overnight hold from 15:00 | `common.py`, `model.py` | Bias statistic by decision time (section 10) |
+""")
+```
+
+Everything is produced by one command, `python Python/riskmodel/pipeline.py --validate`. Every
+number in a table or figure below is read from its output in `data/riskmodel/`, unless the table
+says it is a recorded result.
+
+# 2. The model in one line
 
 For every stock $i$ and every hourly bar $t$:
 
@@ -76,83 +127,276 @@ Both deliverables come out of this one equation:
 - Covariance: $\Sigma = B\,F\,B^\top + D$, where $F$ is the covariance of the factor returns and $D$ is
   the diagonal matrix of residual variances.
 
-So the work is: choose the factors and build $B$ (step 1), estimate $f$ and $u$ (step 2), extend
-both to stocks without characteristics (step 3), sum $u$ into the forecast target (step 4), and
-estimate $F$ and $D$ (step 5). Step 6 checks that the result predicts risk, and section 9 checks
-that nothing uses information from the future.
+The work is therefore: prepare the inputs (section 3), choose the factors and build $B$ (step 1),
+estimate $f$ and $u$ (step 2), extend both to stocks without characteristics (step 3), sum $u$
+into the forecast target (step 4), estimate $F$ and $D$ (step 5), and check the result (step 6).
 
 **Clock.** Bars are hourly and labelled by their end: the 11:00 bar covers (10:00, 11:00]. There are
 seven per day, 10:00 to 16:00; the 10:00 bar carries the overnight move. The book trades at 10:00,
 11:00, 12:00, 13:00, 14:00 and 15:00 only: not in the first half hour (9:30–10:00) and not in the
-last hour (15:00–16:00). These six times are the *decision times* used throughout.
+last hour (15:00–16:00). These six times are the *decision times*. On a half day the market closes
+at 13:00, there are four bars, and the decision times are 10:00, 11:00 and 12:00.
 
-## 2. Step 1 — choose the factors and build the exposures $B$
+# 3. Inputs, and how they are prepared
 
-*Code: `exposures.py`. Output: `exposures.parquet`.*
+## 3.1 The files
+
+| File | What it holds | Source | Period used |
+|---|---|---|---|
+| `data/returns/1h_bar.parquet` | Hourly simple return of each stock, from split- and dividend-adjusted closes | Databento XNAS.ITCH bars, CRSP adjustment factors (`market_data/`) | 2018-05-01 to `{python} str(common.END_DATE.date())` |
+| `data/universe/sp500_universe_early_end.csv` | Start and end date of each stock's index membership | Public S&P 500 history, each membership ended one year early (team rule) | all |
+| `data/universe/sp500_instrument.csv` | Today's GICS sector of today's members | Public list | fallback only |
+| `data/jkp/all.parquet` | 153 characteristics per stock per month-end, market cap, GICS code | JKP global factor data, WRDS | 2018-05 to 2025-12 |
+| `data/jkp/factor_returns_daily.parquet` | Daily return of JKP's 153 long-short factors, US | jkpfactors.com (public) | to `{python} str(TRAIN_END.date())` for the factor choice |
+| `data/jkp/permno_ticker.csv` | Which ticker each CRSP stock used, by date | CRSP name history, WRDS | to 2024-12-31 |
+| `data/jkp/factor_meta.csv` | Name, theme and sign of each of the 153 characteristics | JKP documentation | fixed |
+
+JKP publishes stock-level characteristics monthly only; daily data exists for factor returns, not
+for characteristics. That is why exposures are monthly.
+
+## 3.2 Dates
+
+```{python}
+days = pd.DatetimeIndex(np.sort(R["date"].unique()))
+n_train = int((days <= TRAIN_END).sum())
+Markdown(f"""
+| Date | Value | Meaning |
+|---|---|---|
+| First bar | {days.min().date()} | Start of the Databento data |
+| `END_DATE` | {common.END_DATE.date()} | Last month-end JKP has characteristics for. The returns file runs to November 2026; later bars are ignored by team decision |
+| `TRAIN_END` | {TRAIN_END.date()} | Anything chosen by looking at data (the factor list, the half-lives) uses data up to here only. The two years after it are the hidden test period |
+| Trading days | {len(days):,} | {n_train:,} in the training years, {len(days) - n_train:,} in the hidden years |
+""")
+```
+
+## 3.3 The universe
+
+The model covers the stocks in the membership file on each day. **A stock that is not in the file
+on a day is not traded that day**, and the model has no row for it.
+
+```{python}
+#| tbl-cap: "Stocks per day in the returns file, by year, against the true number of index members."
+per_day = R.groupby("date")["key"].nunique()
+full = pd.read_csv(UNI / "sp500_universe.csv", parse_dates=["start_date", "end_date"])
+sample = per_day.index[::5]
+true_n = pd.Series([int(((full.start_date <= d) & (full.end_date.isna() | (full.end_date > d))).sum()) for d in sample], index=sample)
+t = pd.DataFrame({"trading days": per_day.groupby(per_day.index.year).size(),
+                  "true index members (median)": true_n.groupby(true_n.index.year).median(),
+                  "in the file: min": per_day.groupby(per_day.index.year).min(),
+                  "median": per_day.groupby(per_day.index.year).median(),
+                  "max": per_day.groupby(per_day.index.year).max()}).astype(int)
+t.index.name = "year"
+table(t, 0)
+```
+
+The file has about 20 fewer stocks than the index because each membership is ended one year
+before the stock actually left (a team rule, to stop trading names well before a merger). A ticker
+rename is also treated as an exit, so a renamed company is missing for the year before its
+rename. Both are accepted as they are; section 12 lists them among the inputs that are not point
+in time.
+
+## 3.4 Cleaning the returns
+
+All steps read returns through one function, `common.load_hourly_returns`, so the same cleaning
+applies everywhere. In order:
+
+1. **End date.** Bars after `END_DATE` are not loaded.
+2. **Ticker hand-overs.** When a ticker passes from one company to another, the first "return"
+   under the new owner is the price of one company divided by the price of another. On
+   2020-03-02 the ticker IR passed from Ingersoll-Rand plc to the former Gardner Denver and shows
+   $-75\%$. A size filter cannot tell that from a real crash, so hand-overs are found in CRSP's name
+   history (a company starts using a ticker within 7 days of another giving it up) and that one
+   bar is dropped. Real large moves are kept.
+3. **Half-day bars.** On a half day the file still carries 14:00–16:00 bars built from a few
+   after-hours prints. A bar is *thin* when it holds fewer than
+   `{python} f"{common.THIN_BAR_FRAC:.0%}"` of the stocks in the fullest bar so far that day. A thin
+   bar is removed and its return is compounded into the stock's next real bar, so no price move
+   is lost.
+4. **Error guard.** Any single-bar return larger than `{python} f"{common.MAX_ABS_RET:.0%}"` in
+   absolute value is dropped. None occurs in the data.
+
+```{python}
+raw = pd.read_parquet(common.RETURNS_PATH)
+raw = raw[raw.index.tz_localize(None).normalize() <= common.END_DATE]
+ho = {k: v for k, v in common.handover_dates().items() if k in set(R["key"])}
+nb = R.groupby("date")["period"].nunique()
+Markdown(f"Of {len(raw):,} stock-bars up to the end date, {len(R):,} are kept. "
+         f"{sum(len(v) for v in ho.values())} hand-over bars are dropped "
+         f"({', '.join(f'{k} {v[0].date()}' for k, v in sorted(ho.items(), key=lambda kv: kv[1][0]))}); "
+         f"{int((nb == 4).sum())} half days have their after-hours bars folded forward. "
+         f"Those {int((nb == 4).sum())} days are exactly the days the exchange calendar rule in `common.is_half_day` "
+         f"gives (3 July when 4 July is Tuesday to Friday, the day after Thanksgiving, Christmas Eve on a weekday).")
+```
+
+## 3.5 Linking JKP rows to the stocks we trade
+
+JKP identifies a stock by CRSP's `permno`; the returns identify it by ticker. Every table in the
+model is joined on `key`, the ticker with punctuation removed (BRK.B becomes BRKB).
+
+- The CRSP ticker valid at each month-end is attached through the name history.
+- A JKP row is matched to an index member by its bare ticker. Ticker plus share class (BRK + B)
+  is tried only against members that are themselves written with a class (BRK.B, BF.B).
+  Without that restriction the concatenation invents matches: Mastercard is ticker MA, class A,
+  and "MAA" is a different company.
+- Where two share classes of one company match the same member, the larger one is kept.
+
+The link is verified against a source the model does not otherwise use: JKP's own monthly return
+for each stock (from CRSP), compared with the hourly returns compounded over the same month.
+
+```{python}
+r2 = R.assign(ym=R["date"].dt.to_period("M"))
+tdays = r2.groupby("ym")["date"].nunique()
+g = r2.groupby(["key", "ym"]).agg(ret=("ret", lambda x: np.prod(1 + x) - 1), nd=("date", "nunique")).reset_index()
+g = g[g["nd"] == g["ym"].map(tdays)]
+e1 = pd.read_parquet(RM / "exposures.parquet", columns=["permno", "eom", "key"])
+e1["eom"] = pd.to_datetime(e1["eom"])
+jr = pd.read_parquet(JKP / "all.parquet", columns=["permno", "eom", "ret"]).dropna(subset=["permno"])
+jr["permno"], jr["eom"], jr["ret"] = jr["permno"].astype(int), pd.to_datetime(jr["eom"]), jr["ret"].astype(float)
+j = e1.merge(jr, on=["permno", "eom"])
+j["ym"] = j["eom"].dt.to_period("M")
+prev = j[["key", "ym"]].assign(ym=lambda d: d["ym"] + 1)
+m = g.merge(j[["key", "ym", "ret"]], on=["key", "ym"], suffixes=("_ours", "_jkp")).merge(prev, on=["key", "ym"])
+d = (m["ret_ours"] - m["ret_jkp"]).abs()
+Markdown(f"Over {len(m):,} stock-months the two agree with a correlation of {m['ret_ours'].corr(m['ret_jkp']):.5f} and a "
+         f"median difference of {d.median() * 1e4:.1f} bp. {int((d > .02).sum())} stock-months differ by more than 2% and "
+         f"{int((d > .05).sum())} by more than 5%. A wrong link would show up here as a stock whose months disagree "
+         f"wildly; this check is how two wrong links were found and removed.")
+```
+
+# 4. Step 1 — choose the factors and build the exposures $B$
+
+*Code: `factor_selection.py`, `exposures.py`. Outputs: `data/jkp/style_factors.csv`, `exposures.parquet`.*
 
 The model has three kinds of factors, `{python} len(names)` in total:
 
 - **Market** (1 factor). Every stock has exposure 1.
-- **Sectors** (`{python} len(sectors)` factors). A stock has exposure 1 to its own GICS sector and 0 to the others.
-- **Styles** (`{python} len(styles)` factors). One per JKP cluster, built from the 153 JKP characteristics.
+- **Sectors** (`{python} len(sectors)` factors). A stock has exposure 1 to one sector factor and 0 to the others.
+- **Styles** (`{python} len(styles)` factors). Each is one original JKP characteristic, used as JKP provides it.
 
-Using all 153 characteristics as separate factors is not possible: there are only about 450 stocks
-in each cross-section and many characteristics are near copies of each other. JKP already groups
-the 153 into 13 clusters, so each cluster becomes one composite style factor. At every month-end:
+## 4.1 Choosing the style factors
 
-1. Winsorize each characteristic at $\pm 3$ standard deviations across the S&P 500.
-2. Convert it to a z-score with cap-weighted mean 0 and standard deviation 1.
-3. Multiply by its JKP `direction` ($+1$ or $-1$), so that a high value always means the same
-   thing inside a cluster. Without this, opposite-signed characteristics cancel.
-4. Average the signed z-scores inside each cluster, skipping missing values.
-5. Z-score the composite again. A stock with no data in a cluster gets 0, the average stock.
+JKP has 153 characteristics. Using all of them is not possible: there are only about 450 stocks
+in each cross-section and many characteristics are near copies of each other (several betas,
+several momentum windows). The style factors are a small set of the *original* characteristics,
+chosen in four steps:
+
+1. **Candidates.** Keep characteristics with data for at least 90% of S&P 500 stock-months.
+2. **PCA, training years only.** Principal components of the covariance of JKP's daily factor
+   returns, using data through `{python} str(TRAIN_END.date())` only, so the hidden test years
+   have no say.
+3. **How many.** The table shows how much of the factor-return variance the first $K$ components
+   cover. It flattens quickly; $K = 12$ is used.
+4. **Which ones.** Take the top $K$ eigenvectors, scale each by the square root of its eigenvalue,
+   and run a QR decomposition with column pivoting on them. The first $K$ pivots are the $K$
+   original characteristics whose returns best span the top $K$ components, each chosen for a
+   different direction. The result is $K$ real characteristics, not principal components and not
+   composites.
 
 ```{python}
-#| tbl-cap: "The 13 style factors: how many characteristics each holds and how many needed a sign flip."
-cl = meta.groupby("cluster").agg(
-    characteristics=("factor", "size"),
-    positive=("direction", lambda s: int((s > 0).sum())),
-    negative=("direction", lambda s: int((s < 0).sum())),
-    examples=("factor", lambda s: ", ".join(sorted(s)[:3])),
-)
-table(cl)
+#| tbl-cap: "PCA of JKP's daily factor returns on the training years: variance covered by the first K components."
+pca_tab = pd.read_csv(JKP / "style_factors_pca.csv").set_index("pc")
+ks = [k for k in (1, 2, 3, 5, 8, 10, 12, 15, 20) if k <= len(pca_tab)]
+t = pca_tab.loc[ks, ["explained_pct", "cumulative_pct"]]
+t.index.name = "K"
+t.columns = ["component K alone (%)", "first K together (%)"]
+table(t, 1)
 ```
+
+```{python}
+#| tbl-cap: "The chosen style factors, in pick order. Direction -1 means the factor is long LOW values (the size factor is long small stocks)."
+chosen = pd.read_csv(JKP / "style_factors.csv").set_index("factor")
+t = chosen[["description", "cluster", "direction", "coverage_sp500"]].copy()
+t["coverage_sp500"] = 100 * t["coverage_sp500"]
+t.columns = ["what it is", "JKP theme", "direction", "S&P 500 coverage (%)"]
+table(t, 1)
+```
+
+The picks are not unique. Many of the 153 are near-substitutes, and a different sample picks a
+different member of the same family: choosing on the first versus the second half of the training
+years gives only 3 of the same 12 names, though 9 JKP themes appear in both lists (beta, momentum,
+reversal, size, value, profitability, growth and so on). Read the list as one representative per
+theme, not as the 12 best characteristics. Alternative lists built the same way, and a list built
+by forward selection on explained return variance, give a model that predicts risk about equally
+well.
+
+## 4.2 Turning each one into an exposure
+
+At every month-end, across the S&P 500 stocks that have JKP data:
+
+1. **Winsorize** the characteristic at $\pm 3$ standard deviations (values beyond are set to the
+   bound).
+2. **Standardize** it: subtract the cap-weighted mean, divide by the standard deviation.
+   Cap-weighted centring makes the index itself style-neutral, so the market factor carries the
+   market.
+3. **Sign** it: multiply by its JKP `direction` ($+1$ or $-1$), so the exposure points the same way
+   as JKP's published factor of the same name.
+4. **Missing values** become 0, the average stock.
+
+## 4.3 Sectors
+
+Each stock gets a GICS sector, from the first source that has one:
+
+1. JKP's GICS code for that month (point in time).
+2. The same stock's most recent earlier JKP code (point in time).
+3. Today's S&P 500 member list (not point in time; section 12 measures how much it matters).
+4. Otherwise "Other".
+
+A sector becomes a factor only if at least `{python} common.MIN_SECTOR` stocks with JKP data share
+it that month. Stocks of thinner sectors are pooled into one "Other" factor, and if that pool is
+itself below `{python} common.MIN_SECTOR` stocks they get no sector factor. The decision is made
+once per month-end and stored (`sector_model`), so the regression and the covariance use exactly
+the same sector for every stock.
+
+## 4.4 Timing
 
 Exposures are monthly because the characteristics are monthly. A bar on date $d$ always uses the
-exposures of the last month-end **strictly before** $d$, so nothing from the future enters.
-
-The sector of a stock is taken from point-in-time sources first: JKP's GICS code for that month,
-then the stock's own most recent earlier code. Only stocks JKP has no code for fall back to
-today's S&P 500 member list (section 9 says how much that matters).
+exposures of the last month-end **strictly before** $d$, and never exposures more than
+`{python} common.MAX_STALE_DAYS` days old.
 
 ```{python}
-#| tbl-cap: "Example exposures at the last month-end (sector factor, tier, and four of the 13 styles)."
+#| tbl-cap: "Example exposures at the last month-end (sector factor, tier, and the first four style factors)."
 show = ["AAPL", "JPM", "XOM", "NEE", "PLD"]
 snap = exp[(exp["eom"] == last_eom) & exp["key"].isin(show)].set_index("key").loc[show]
-table(snap[["sector_model", "tier", "Size", "Value", "Momentum", "Low Risk"]]
-      .rename(columns={"sector_model": "sector factor"}))
+table(snap[["sector_model", "tier"] + styles[:4]].rename(columns={"sector_model": "sector factor"}))
 ```
 
-## 3. Step 2 — estimate factor returns and residuals
+# 5. Step 2 — estimate factor returns and residuals
 
-*Code: `factor_returns.py`. Outputs: `factor_returns_hourly.parquet`, `residuals_hourly.parquet`.*
+*Code: `factor_returns.py`. Outputs: `factor_returns_hourly.parquet`, `residuals_hourly.parquet`,
+`factor_returns_halfA_hourly.parquet`, `factor_returns_halfB_hourly.parquet`.*
 
 For each hourly bar we run **one regression across all stocks**. The dependent variable is that
 bar's stock returns, the regressors are the exposures $B$. The fitted coefficients are the factor
 returns $f_t$ and the regression residuals are $u_{i,t}$. This is repeated for all
 `{python} f"{len(F):,}"` bars from `{python} str(F.index.min().date())` to `{python} str(F.index.max().date())`.
 
-Three details make the regression well behaved:
+$$r_{i,t} \;=\; f_{mkt,t} + \sum_s S_{i,s}\, f_{s,t} + \sum_k X_{i,k}\, f_{k,t} + u_{i,t}$$
 
-- **Weights.** It is weighted least squares with weight $\sqrt{\text{market cap}}$, i.e. it
-  minimizes $\sum_i \sqrt{me_i}\,u_i^2$. Large stocks have less noisy returns, so they deserve more
-  weight, but not so much that a handful of mega-caps decide every factor return.
+The details, in the order the code applies them:
+
+- **Which stocks.** Stocks in the file that have a return in the bar and JKP exposures from the
+  latest month-end. A bar is skipped if it has fewer than 3 stocks per regressor; none is.
+- **Weights.** Weighted least squares with weight $v_i = \sqrt{\text{market cap}_i}$, scaled to mean
+  1: the fit minimizes $\sum_i v_i\,u_i^2$. Large stocks have less noisy returns, so they deserve
+  more weight, but not so much that a handful of mega-caps decide every factor return.
 - **Sector constraint.** Market plus a dummy for every sector is perfectly collinear. The sector
-  returns are therefore constrained to a cap-weighted sum of zero, which makes the intercept the
-  market return and each sector return "sector relative to market".
-- **Outliers.** For the fit only, returns are clipped at 8 robust standard deviations from the
-  cross-sectional median, so a single extreme move cannot distort its sector's factor return. The
-  residual is always computed from the true return, so $r = Bf + u$ holds exactly.
+  returns are constrained to a cap-weighted sum of zero, $\sum_s c_s f_s = 0$ with $c_s$ the
+  market cap of sector $s$. The last sector's return is written as
+  $f_{last} = -\sum_{s \ne last} c_s f_s / c_{last}$ and substituted into the regression, so the
+  intercept is the market return and each sector return is "sector relative to market". Every
+  sector's return is saved, including the substituted one.
+- **Ridge.** A penalty of `1e-4` on every coefficient except the market. With weights of mean 1
+  it is negligible; it only keeps the matrix invertible in degenerate bars.
+- **Outliers.** For the fit only, returns are clipped at `{python} f"{fr_mod.FIT_CLIP_SD:g}"` robust
+  standard deviations from the cross-sectional median (robust standard deviation = 1.4826 times
+  the median absolute deviation), so a single extreme move cannot distort its sector's factor
+  return.
+- **Residual.** Always the true return minus the fit, so $r = Bf + u$ holds exactly, including
+  for the stock with the extreme move.
+- **Two half-sample fits.** Each bar is also fitted twice, on two random halves of the stocks.
+  The halves are drawn within each sector so both hold every sector, from a random generator
+  seeded by the date and hour, with the stocks first put in a fixed order. Step 5 uses the two
+  estimates to remove estimation noise from the covariance.
 
 ```{python}
 #| tbl-cap: "Effective number of stocks in the regression under three weighting choices (last month-end)."
@@ -180,21 +424,19 @@ table(t, 1)
 One stock, one bar, to make the decomposition concrete:
 
 ```{python}
-#| tbl-cap: "Decomposition of one stock's return in one bar (basis points)."
 when = pd.Timestamp("2025-06-17 11:00")
 key = "AAPL"
 B = model.exposures(when)
 f = F.loc[when]
 contrib = B.loc[key, names].astype(float) * f
-u = model._residuals("hourly")
-resid = u[(u["date"] == when.normalize()) & (u["hour"] == when.hour) & (u["key"] == key)]["resid"].iloc[0]
+resid = U[(U["date"] == when.normalize()) & (U["hour"] == when.hour) & (U["key"] == key)]["resid"].iloc[0]
 parts = pd.Series({"market": contrib["market"], "sector": contrib[sectors].sum(),
-                   "styles (13)": contrib[styles].sum(), "residual u": resid})
+                   f"styles ({len(styles)})": contrib[styles].sum(), "residual u": resid})
 parts["= stock return"] = parts.sum()
 Markdown(f"**{key}, bar ending {when:%Y-%m-%d %H:%M}**\n\n" + (parts * 1e4).round(2).rename("bp").to_frame().to_markdown())
 ```
 
-## 4. Why a factor model and not a "simple OLS"?
+# 6. Why a factor model and not a "simple OLS"?
 
 The factor model **is** a least-squares regression — one per bar, across stocks. The real question
 is what to regress on, and across which dimension. There are two natural "simple" alternatives.
@@ -214,17 +456,18 @@ factors but treats a \$20bn stock and a \$3tn stock as equally informative. Smal
 noisier, so the factor returns come out noisier; and the constrained intercept stops matching the
 cap-weighted market. Weighting by $\sqrt{\text{cap}}$ is the standard compromise (table above).
 
-The cross-sectional factor regression avoids these problems: exposures are known in advance from
-characteristics, no per-stock history is needed, and the residual is by construction free of
-market, sector and style in every single bar — the same factors the optimizer controls.
+A third alternative was measured directly: take JKP's *published* daily factor returns and
+estimate each stock's betas to them. On days the betas had not seen, that left 59% of daily return
+variance in the residual, against 45% for the cross-sectional model (recorded result, daily
+frequency, 2019–2025, with the earlier cluster factors). It also cannot produce hourly residuals,
+because the published factor returns are daily.
 
 How much each approach removes, on our data:
 
 ```{python}
 #| tbl-cap: "Share of single-bar return variance left after each adjustment (stocks in the regression, all bars)."
-r = common.load_hourly_returns(verbose=False)
-uu = u[u["permno"] > 0][["date", "hour", "key", "resid"]]
-m = r.merge(uu, on=["date", "hour", "key"], how="inner")
+uu = U[U["permno"] > 0][["date", "hour", "key", "resid"]]
+m = R.merge(uu, on=["date", "hour", "key"], how="inner")
 m["mkt"] = m["period"].map(F["market"])
 m["xs_mean"] = m.groupby("period")["ret"].transform("mean")
 v_raw = m["ret"].var()
@@ -232,48 +475,75 @@ left = pd.Series({
     "raw return": 1.0,
     "minus the market factor (beta = 1)": (m["ret"] - m["mkt"]).var() / v_raw,
     "minus the equal-weight average stock": (m["ret"] - m["xs_mean"]).var() / v_raw,
-    "factor-model residual u (market + sector + 13 styles)": m["resid"].var() / v_raw,
+    f"factor-model residual u (market + sector + {len(styles)} styles)": m["resid"].var() / v_raw,
 }).mul(100).rename("variance left (%)")
 table(left.to_frame(), 1)
 ```
 
-The first two rows after "raw" are the simple market adjustments (with beta fixed at 1 rather than
-estimated per stock). The last row is what the alpha models are actually asked to forecast.
-
 We do use a time-series regression in one place: for stocks that have no characteristics at all
 (next section), because there it is the only information available.
 
-## 5. Step 3 — cover the stocks JKP does not have
+# 7. Step 3 — cover the stocks JKP does not have
 
 *Code: `coverage.py`. Outputs: `exposures_covered.parquet`, `residuals_covered_hourly.parquet`,
-`factor_returns_stage2_hourly.parquet`.*
+`factor_returns_stage2_hourly.parquet` (and its two half-sample versions), `coverage_report.csv`.*
 
-JKP excludes REITs and a few other names, about 30 of the ~480 index members. The optimizer cannot
-hold a stock the model does not cover, so they are added in tiers:
+JKP excludes REITs and a few other names, about 30 of the ~480 stocks in the file. The optimizer
+cannot hold a stock the model does not cover, so they are added in tiers:
 
 - **Tier 1**: stocks with JKP characteristics (steps 1–2).
-- **Tier 2**: no characteristics but at least 60 days of returns. Their style exposures are
-  time-series betas: the stock's return, net of market and sector, regressed on the style factor
-  returns over the previous year, then shrunk toward the typical exposure of the sector.
-- **Tier 3**: too little history (a new index member). Market 1, its sector, and the sector's
-  median style exposures.
+- **Tier 2**: no characteristics but at least `{python} cov_mod.MIN_BARS // 7` trading days of
+  returns before the month-end. Their style exposures are time-series betas.
+- **Tier 3**: less history than that (a new index member). Market 1, its sector, and the prior
+  below as style exposures.
 
-These stocks never enter the step-2 regression, so the regression's factor returns stay clean.
+These stocks never enter the step-2 regression, so its factor returns stay clean.
 
-**The Real Estate factor.** The step-2 regression sees at most one Real Estate stock, so it cannot
-estimate a Real Estate factor. Without one, the common move of ~30 REITs would be treated as 30
-independent stock-specific moves, and a REIT-heavy portfolio would look far safer than it is. So
-the factor is estimated in a second stage, per bar, as the average return of the REITs after
-removing market and styles. Their residual is what remains after that.
+**Tier-2 betas, in detail.** For month-end $m$ and stock $i$:
+
+1. Take the stock's hourly returns over the last 252 trading days strictly before $m$. If the
+   ticker belonged to a different company before a hand-over date, only the bars after it.
+2. Subtract what is known: the market factor return (loading 1) and its sector's factor return
+   (loading 1).
+3. Regress the remainder on the style factor returns by ordinary least squares, giving a beta
+   $b_k$ and a standard error $se_k$ for each style.
+4. Shrink toward a prior: $\hat b_k = w_k b_k + (1 - w_k)\,p_k$ with
+   $w_k = \tau_k^2 / (\tau_k^2 + se_k^2)$. The prior $p_k$ is the median exposure, and $\tau_k^2$
+   the variance of the exposure, among the tier-1 stocks of the same sector; if that sector has
+   fewer than `{python} common.MIN_SECTOR` such stocks (Real Estate has one or two), all tier-1
+   stocks are used instead.
+
+A beta of 1.0 and a characteristic z-score of 1.0 both mean "one unit of the factor return", so
+tier-2 and tier-1 exposures are in the same units.
+
+**Market cap.** JKP has no market cap for these stocks. They are given the median market cap of
+the tier-1 stocks of their sector. This only affects cap-weighted benchmark weights.
+
+**Membership.** A stock that joins the file during a month gets a row at the previous month-end,
+so it is covered from its first day. The row's values still use only data before the month-end,
+and the model does not serve it before the day the stock is in the file.
+
+**The Real Estate factor.** The step-2 regression sees at most one or two Real Estate stocks, so
+it cannot estimate a Real Estate factor. Without one, the common move of ~30 REITs would be
+treated as 30 independent stock-specific moves, and a REIT-heavy portfolio would look far safer
+than it is. Wherever at least `{python} common.MIN_SECTOR` covered stocks share a sector that has
+no factor, the factor is estimated in a second stage, per bar:
+
+$$f_{sector,t} \;=\; \text{mean over those stocks of}\;\bigl(r_{i,t} - f_{mkt,t} - \textstyle\sum_k \hat b_{i,k}\, f_{k,t}\bigr)$$
+
+It needs at least `{python} cov_mod.MIN_STAGE2` stocks in the bar. Their residual is what remains
+after it. The same is computed on each half-sample set of factor returns, with each REIT assigned
+to a half by a hash of its ticker and the month, so step 5's noise correction covers this factor
+too.
 
 ```{python}
-#| tbl-cap: "Coverage of the point-in-time S&P 500 in the last three months."
+#| tbl-cap: "Coverage of the stocks in the file, last three months."
 rep = pd.read_csv(RM / "coverage_report.csv", parse_dates=["eom"]).tail(3)
 rep["eom"] = rep["eom"].dt.date
-table(rep.set_index("eom").rename(columns={"stage2_sectors": "second-stage sector factor"}))
+table(rep.set_index("eom").rename(columns={"universe": "stocks", "stage2_sectors": "second-stage sector factor"}))
 ```
 
-## 6. Step 4 — the residualized return the alpha models forecast
+# 8. Step 4 — the residualized return the alpha models forecast
 
 *Code: `alpha_target.py`. Output: `alpha_target_1d.parquet`.*
 
@@ -288,17 +558,19 @@ residuals over that window:
 $$u^{1d}_{i}(t) \;=\; \sum_{s \in (t,\; t + 1\text{ trading day}]} u_{i,s}$$
 
 From a 10:00 decision the window is the 11:00–16:00 bars of the same day plus the 10:00 bar of the
-next trading day: 7 bars. The window is defined by the clock ("same time, next trading day"), so
-it stays correct around half days. A target is produced only if the stock has a residual on every
-bar of the window.
+next trading day: 7 bars. Returns are summed, not compounded; over one day the difference is
+small, and summing is what keeps the factor decomposition additive. The window is defined by the
+clock ("same time, next trading day"), so it stays correct around half days, where it holds 4
+bars. A target is produced only if the stock has a residual on every bar of the window.
 
 Our returns are built from bar closes, and the close of the 10:00 bar and the open of the 11:00
 bar are the same moment. Checked against the open-to-open return computed directly from the raw
-bars (March–July 2024), the two agree with a correlation of 0.998–0.9995 at every decision time and
-a median difference of 2–4 bp on a target whose volatility is about 175 bp.
+bars (March–July 2024, recorded result), the two agree with a correlation of 0.998–0.9995 at every
+decision time and a median difference of 2–4 bp on a target whose volatility is about 175 bp.
 
-**No 16:00 row.** The book does not trade in the last hour, so no decision is made at 16:00 and the
-file has no 16:00 row. Two things follow from that, and both are deliberate:
+**Which rows exist.** One row per stock per decision time. There is no row at the day's last bar
+(16:00, or 13:00 on a half day): the book does not trade in the last hour, so no decision is made
+then. Two things follow, and both are deliberate:
 
 - The 16:00 *bar* is still inside every window that spans it. A 15:00 decision targets 15:00 to
   15:00 the next day, which includes the 16:00 bar and the overnight move.
@@ -306,18 +578,17 @@ file has no 16:00 row. Two things follow from that, and both are deliberate:
   close is 10:00 the next morning, and that forecast already exists: it is the 10:00 row, made
   with the overnight information included.
 
-A 16:00 row would also not match the definition above. After 16:00 the "next bar open" is the
-following morning, so the open-to-open window would run morning to morning, while summing bars
-from the close runs close to close. In the March–July 2024 check those two differ materially
-(correlation 0.72), which is how the problem was found.
+A 16:00 row would also not match the definition. After 16:00 the "next bar open" is the following
+morning, so the open-to-open window would run morning to morning, while summing bars from the
+close runs close to close. In the 2024 check those two differed materially (correlation 0.72),
+which is how the problem was found.
 
 File columns: `forecast_time` (decision time; a forecast may use data up to here),
-`forecast_date`, `hour`, `target_time` (end of the window), `n_bars`, `ticker`,
-`residual_fwd_1d` (the target) and `raw_fwd_1d` (the same window on raw returns).
+`forecast_date`, `hour`, `target_time` (end of the window), `n_bars`, `ticker` (as traded, e.g.
+BRK.B), `residual_fwd_1d` (the target) and `raw_fwd_1d` (the same window on raw returns).
 
 ```{python}
 #| tbl-cap: "The 1-day target by decision time: volatility of the residual vs. the raw return, and the share of variance the factors removed."
-tgt = pd.read_parquet(RM / "alpha_target_1d.parquet", columns=["hour", "residual_fwd_1d", "raw_fwd_1d"])
 by = tgt.groupby("hour").agg(rows=("residual_fwd_1d", "size"),
                              residual_bp=("residual_fwd_1d", lambda x: x.std() * 1e4),
                              raw_bp=("raw_fwd_1d", lambda x: x.std() * 1e4))
@@ -331,7 +602,7 @@ Consecutive hourly targets share 6 of their 7 bars, so they are strongly autocor
 construction. Evaluate forecasts on non-overlapping samples (for example one decision time per
 day) or with HAC standard errors, not naive t-statistics.
 
-## 7. Step 5 — the covariance
+# 9. Step 5 — the covariance
 
 *Code: `model.py`. Nothing is stored; the functions compute from the files above on request.*
 
@@ -340,41 +611,72 @@ assembled from three small pieces:
 
 $$\Sigma \;=\; B\,F\,B^\top + D$$
 
-**$F$, the factor covariance** (`model.cov`). Step 2 produced a time series of factor returns, one
-vector per bar. $F$ is its covariance, estimated with only the bars up to the decision time:
+## 9.1 $F$, the factor covariance (`model.cov`)
 
-1. *Hour of day.* The 10:00 bar contains the overnight move and is far more volatile than the
-   others. Each factor return is divided by that factor's typical volatility for its hour. The
-   covariance of these standardized returns captures the "shape" (correlations and the current
-   volatility level); it is then multiplied back by the scales of the hour being forecast.
-2. *Recency.* The covariance is exponentially weighted (half-life
-   `{python} model.HALFLIFE_COV_DAYS` trading days), so it follows the current volatility regime.
-3. *Estimation noise.* A factor return estimated from ~450 stocks is the true factor return plus
-   noise, and the noise inflates its variance. Step 2 also estimates every bar twice on two random
-   halves of the stocks. Both halves see the same true factor return but have independent noise,
-   so the covariance *between* the two halves keeps the signal and drops the noise.
-4. *Conditioning.* Eigenvalues are floored at 0.1% of the largest, so the optimizer can invert it.
+Step 2 produced a time series of factor returns, one vector per bar. $F$ at a decision time uses
+only the bars up to and including that time. It is built in five moves.
 
-**$D$, the specific variance** (`model.specific_var`). For each stock, an exponentially weighted
-average of its own squared residuals (half-life `{python} model.HALFLIFE_SPEC_DAYS` trading days),
-with the same hour-of-day scaling. Residuals are assumed uncorrelated across stocks, which is why
-$D$ is diagonal — and why step 3's Real Estate factor matters.
+1. **Hour-of-day scales.** The 10:00 bar contains the overnight move and is far more volatile than
+   the others. For each factor $k$ and each bar of the day $h$, $s_{k,h}$ is the standard deviation
+   of that factor's returns in bars of hour $h$, over all history so far. An hour with fewer than
+   `{python} model.MIN_HOUR_OBS` bars of history uses the all-hours figure.
+2. **Standardize.** Each factor return is divided by its hour's scale, $g_{k,t} = f_{k,t} / s_{k,h(t)}$.
+   All bars are now comparable, so all of them can be used to estimate one matrix.
+3. **Exponentially weighted covariance.** $C$ is the covariance of the standardized returns with
+   weights that halve every `{python} model.HALFLIFE_COV_DAYS` trading days: a bar $j$ bars ago has
+   weight proportional to $0.5^{\,j/H}$ with $H$ = `{python} HL_BARS` bars. $C$ carries both the
+   correlations and the current level of volatility relative to its long-run level.
+4. **Rescale to the bar being forecast.** $F_h = \mathrm{diag}(s_{\cdot,h})\; C\; \mathrm{diag}(s_{\cdot,h})$,
+   where $h$ is the hour of the bar being *forecast*, not the bar just observed.
+5. **Conditioning.** Eigenvalues of the final matrix are floored at
+   `{python} f"{model.MIN_EIGEN_RATIO:.1%}"` of the largest, so the optimizer can invert it and
+   cannot find directions that look riskless only because of estimation noise.
 
-**Combining.** For a portfolio with weights $w$, let $x = B^\top w$ be its factor exposures. Then
+The covariance is served once at least 252 bars (36 trading days) of factor returns exist.
+
+**Removing estimation noise.** A factor return estimated from ~450 stocks is the true factor
+return plus noise, and the noise inflates its variance. Step 2 estimated every bar twice, on two
+random halves of the stocks: $f^A = f + e^A$ and $f^B = f + e^B$, with independent errors. Then
+$\mathrm{Cov}(f^A, f^B) = \mathrm{Cov}(f, f)$: the covariance *between* the two halves keeps the
+signal and drops the noise. Both the hour scales in move 1 and the matrix in move 3 are computed
+this way. The cross-covariance of two noisy series is not exactly symmetric or positive, so it is
+symmetrized and its negative eigenvalues are lifted before use.
+
+## 9.2 $D$, the specific variance (`model.specific_var`)
+
+For each stock, an exponentially weighted average of its own squared residuals:
+
+1. Residuals are standardized by the hour scale of residuals (the standard deviation of all
+   stocks' residuals in bars of that hour, over history so far).
+2. $d_i$ is the weighted mean of the stock's squared standardized residuals, with weights that
+   halve every `{python} model.HALFLIFE_SPEC_DAYS` trading days.
+3. It is rescaled to the hour of the bar being forecast.
+4. A stock with fewer than `{python} model.MIN_SPEC_OBS` residuals gets the median stock's value.
+   After a ticker hand-over, the previous company's residuals are not used for the new one.
+
+Residuals are assumed uncorrelated across stocks, which is why $D$ is diagonal — and why step 3's
+Real Estate factor matters.
+
+## 9.3 Combining, and which horizon to use
+
+For a portfolio with weights $w$, let $x = B^\top w$ be its factor exposures. Then
 
 $$\sigma^2(w) \;=\; x^\top F\, x \;+\; \sum_i w_i^2 D_i .$$
 
-For a holding period of several bars, the per-bar covariances of the bars actually spanned are
-added (`model.cov_span`, `model.specific_var_span`); one trading day is 7 bars.
+$B$ lists the stocks that are in the file on that day.
 
-**Which horizon to use.** Because the book only trades at the six decision times, a position is
-not always held for one bar. `model.holding_bars(when)` returns how long it is held:
+For a holding period of several bars, the per-bar matrices of the bars actually spanned are added
+(`model.cov_span`, `model.specific_var_span`); one trading day is 7 bars. Because the book only
+trades at the decision times, a position is not always held for one bar.
+`model.holding_bars(when)` returns how long it is held:
 
 - taken at 10:00–14:00: held 1 bar, until the next decision time;
 - taken at 15:00: held 2 bars, the 16:00 bar **and** the next day's 10:00 bar. This is the
-  overnight position, and it is by far the riskiest holding period of the day.
+  overnight position, and it is by far the riskiest holding period of the day;
+- on a half day the last decision time is 12:00, and that position is likewise held 2 bars
+  (13:00 and the next 10:00).
 
-The optimizer should size the 15:00 trade with the 2-bar covariance, not the 1-bar one.
+The optimizer should size each trade with the covariance of its own holding period.
 
 ```{python}
 #| fig-cap: "Predicted volatility of the cap-weighted index over the next bar, by the bar being forecast (last day of the model)."
@@ -382,7 +684,7 @@ B = model.exposures(last_bar)
 cap = B["me"] / B["me"].sum()
 day = last_bar.normalize()
 rows = []
-for h in common.TRADING_HOURS:
+for h in common.session_hours(day):
     t = day + pd.Timedelta(h, unit="h")
     if t <= last_bar:
         rows.append({"next bar": f"{model.forward_hours(t, 1)[0]}:00", "bp": model.total_risk(cap, t)["vol_bp"]})
@@ -399,6 +701,8 @@ plt.show()
 rows = []
 for h in common.DECISION_HOURS:
     t = day + pd.Timedelta(h, unit="h")
+    if not common.is_decision_time(t):
+        continue
     n = model.holding_bars(t)
     rows.append({"position taken at": f"{h}:00", "bars held": n,
                  "held until": f"{model.forward_hours(t, n)[-1]}:00" + (" next day" if n > 1 else ""),
@@ -410,7 +714,7 @@ table(pd.DataFrame(rows).set_index("position taken at"), 1)
 #| tbl-cap: "Predicted risk over one trading day at the last model date, annualized (%)."
 eq = pd.Series(1 / len(B), index=B.index)
 rows = []
-for label, w in [("cap-weighted S&P 500", cap), ("equal-weighted S&P 500", eq), ("active: EW - CW", eq - cap)]:
+for label, w in [("cap-weighted index", cap), ("equal-weighted index", eq), ("active: EW - CW", eq - cap)]:
     x = model.total_risk(w, last_bar, horizon_bars=7)
     rows.append({"portfolio": label, "total": 100 * x["total_risk_ann"], "factor": 100 * x["factor_risk_ann"],
                  "specific": 100 * x["specific_risk_ann"]})
@@ -425,7 +729,7 @@ How the optimizer uses it:
 from riskmodel import model
 
 when = "2025-06-17 15:00"                    # decision time (bar end)
-B = model.exposures(when)                    # index members on that day x factors, by normalized ticker
+B = model.exposures(when)                    # stocks in the file that day x factors, by normalized ticker
 n = model.holding_bars(when)                 # 1 bar, or 2 from 15:00 (the overnight hold)
 F = model.cov_span(when, n_bars=n)           # factor covariance over the holding period
 D = model.specific_var_span(when, n_bars=n, index=B.index)
@@ -435,36 +739,114 @@ x = X.T @ w                                  # w: weights aligned to B.index
 variance = x @ F.to_numpy() @ x + (w ** 2) @ D.to_numpy()
 ```
 
-## 8. Step 6 — does it predict risk?
+## 9.4 Adding bars: is the correlation between bars a problem?
 
-*Code: `bias_test.py`. Output: `bias_test_hourly.csv`.*
-
-For a test portfolio, at each test bar the model predicts the next bar's volatility
-$\sigma_t$ using only earlier data. The realized return is divided by it, $z_t = r_{t+1}/\sigma_t$.
-If the model is right, $z$ has standard deviation 1. That standard deviation is the **bias
-statistic**: above 1 the model understates risk, below 1 it overstates it.
+Adding per-bar matrices assumes returns in different bars are uncorrelated. Measured on the
+training years:
 
 ```{python}
-#| tbl-cap: "Bias statistic by group of test portfolios (1 = correct). 'passing' counts portfolios inside the 95% band."
-bt = pd.read_csv(RM / "bias_test_hourly.csv", index_col=0)
-grp = bt.groupby("group").agg(portfolios=("bias_stat", "size"), mean=("bias_stat", "mean"),
-                              min=("bias_stat", "min"), max=("bias_stat", "max"),
-                              passing=("within_ci", "sum"))
-table(grp, 3)
+#| tbl-cap: "Variance of the factor return summed over a holding period, divided by the sum of the per-bar variances. 1.00 means no correlation between bars."
+ftr = F[F.index <= TRAIN_END + pd.Timedelta(1, unit="D")]
+x, hrs = ftr.to_numpy(), ftr.index.hour.to_numpy()
+
+
+def ratio(n, starts):
+    idx = [i for i in range(len(x) - n) if hrs[i] in starts]
+    seg = np.stack([x[i + 1:i + 1 + n] for i in idx])          # (samples, n, factors)
+    return seg.sum(axis=1).var(axis=0) / np.maximum(seg.var(axis=0).sum(axis=0), 1e-30)
+
+
+cols = list(ftr.columns)
+pick = lambda r, which: float(np.median([r[cols.index(c)] for c in which]))
+rows = []
+for label, n, starts in [("overnight hold from 15:00 (2 bars)", 2, {15}), ("one trading day (7 bars)", 7, set(common.DECISION_HOURS))]:
+    r = ratio(n, starts)
+    rows.append({"holding period": label, "market": r[cols.index("market")], "sectors (median)": pick(r, sectors),
+                 "styles (median)": pick(r, styles)})
+table(pd.DataFrame(rows).set_index("holding period"), 2)
 ```
 
+The ratios are at or below 1: returns in consecutive bars are slightly *negatively* correlated,
+most of all for the market factor. Adding the bars therefore errs on the cautious side, and a
+correction for correlation between bars would lower the predicted risk of multi-bar holds, not
+raise it. It is not applied, because those holds are already slightly under-predicted (section
+10).
+
+## 9.5 Barra refinements that were tested and not adopted
+
+Barra's US model uses a longer memory for correlations than for volatilities, a volatility regime
+adjustment, and shrinkage of specific risk toward similar-sized stocks. All three are implemented
+as options in `model.py` and were tested. Each candidate was scored on the training years only,
+with the bias test on the book's real holding periods (about 1,400 test periods per portfolio).
+The score is the mean distance of the bias statistic from 1 per portfolio and calendar year; lower
+is better.
+
+| Setting | Values tested | Score | Decision |
+|---|---|---|---|
+| Covariance half-life (days) | 5 / 7 / **10** / 15 / 21 / 42 | 0.066 / 0.069 / **0.072** / 0.077 / 0.083 / 0.100 | Keep 10: short is better and the short end is flat |
+| Separate correlation half-life of 252 days, with volatility half-life | 10 / 21 / 42 | 0.092 / 0.099 / 0.113 | Off: worse than one short memory |
+| Volatility regime adjustment (half-life 5 or 10 days), on four combinations | — | 0.101 to 0.123 | Off: worse |
+| Specific-variance half-life (days) | 21 / 30 / **42** / 63 / 126 | 0.055 / 0.056 / **0.057** / 0.061 / 0.072 | 42: the longest value on the flat part (was 126) |
+| Specific-risk shrinkage strength | 0.1 / 0.3 | 0.072 / 0.072 (0.058 with half-life 42) | Off: no gain |
+
+: Recorded result of the tuning runs, training years 2019-06 to 2023-12. Run before the last three corrections to the code (half-day holding periods, the REIT prior, hand-over history); those affect a handful of days and stocks. {tbl-colwidths="[30,22,26,22]"}
+
+The longer memories fail here for a clear reason: intraday volatility changes within days, and a
+matrix that remembers months reacts too slowly, so it under-predicts risk after volatility rises.
+With hourly bars a 10-day half-life already holds about 200 effective observations.
+
+# 10. Step 6 — does it predict risk?
+
+*Code: `bias_test.py`. Outputs: `bias_test_hourly*.csv`.*
+
+**The test.** For a test portfolio, at each test bar the model predicts the volatility $\sigma_t$
+of the portfolio over the next bar (or holding period) using only earlier data. The realized
+return is divided by it, $z_t = r_{t+1}/\sigma_t$. If the model is right, $z$ has standard
+deviation 1. That standard deviation is the **bias statistic** $B$: above 1 the model understates
+risk, below 1 it overstates it. With $T$ test periods the 95% band is $1 \pm 2\sqrt{1/(2T)}$.
+
+**The portfolios.** The cap-weighted and equal-weighted index and their difference; one tilt per
+style factor (long high exposure, short low); one portfolio per sector factor (the sector against
+the index); and 20 random long-short portfolios. A model that works for the index but fails on
+tilts is not usable by an optimizer, so each group is reported separately.
+
+**Three versions of the test.**
+
+- *Next bar*: every third bar, risk of the following bar.
+- *Holding period*: every decision time, risk until the book can trade again (1 bar, or 2 from
+  15:00). Consecutive holding periods do not overlap.
+- *One day*: every eighth bar, risk of the next 7 bars — the horizon of the alpha target. Every
+  eighth, so that the windows do not overlap and every time of day is covered.
+
 ```{python}
-Markdown(f"Across all {len(bt)} portfolios, {int(bt['within_ci'].sum())} are inside the 95% band and the "
-         f"mean absolute deviation of the bias statistic from 1 is {(bt['bias_stat'] - 1).abs().mean():.3f}. "
-         f"Each portfolio has {int(bt['n'].median())} test bars, so the band is about "
-         f"{bt['ci_low'].median():.2f}–{bt['ci_high'].median():.2f}.")
+#| tbl-cap: "Bias statistic by group of test portfolios, for the three tests (1 = correct)."
+h7 = pd.read_csv(RM / "bias_test_hourly_h7.csv", index_col=0)
+tests = [("next bar", bt), ("holding period", hold), ("one day", h7)]
+t = pd.DataFrame({label: d.groupby(d.index.map(group_of))["bias_stat"].mean().map("{:.3f}".format) for label, d in tests})
+t.loc["all portfolios: mean distance from 1"] = [f"{(d['bias_stat'] - 1).abs().mean():.3f}" for _, d in tests]
+t.loc["portfolios inside the 95% band"] = [f"{int(d['within_ci'].sum())} of {len(d)}" for _, d in tests]
+t.loc["test periods per portfolio"] = [f"{int(d['n'].median()):,}" for _, d in tests]
+t.index.name = "group"
+Markdown(t.to_markdown())
 ```
 
-The same test on the book's real holding periods (start only at a decision time, hold until the
-next one):
+The next-bar test is the cleanest and the model is close to 1 in every group. The band is narrow
+when there are thousands of test periods, so "inside the band" is a strict standard there; the
+distance from 1 is the more useful number.
 
 ```{python}
-#| tbl-cap: "Bias statistic by decision time, real holding periods (mean, min and max over the test portfolios)."
+#| tbl-cap: "Next-bar test, bias statistic by calendar year (mean over the portfolios of each group). 2024 and 2025 are the hidden years."
+by_year = pd.read_csv(RM / "bias_test_hourly_by_year.csv", index_col=0)
+by_year.columns = [{"index/active": "index / active", "random": "random long-short", "sector tilt": "sector vs. index"}.get(c, "style tilt")
+                   for c in by_year.columns]
+by_year.index = [f"{y}{' (hidden)' if y > TRAIN_END.year else ''}" for y in by_year.index]
+table(by_year, 3)
+```
+
+No setting was chosen using 2024–2025.
+
+```{python}
+#| tbl-cap: "Holding-period test, bias statistic by decision time (mean, min and max over the test portfolios)."
 bh = pd.read_csv(RM / "bias_test_hourly_holding_by_hour.csv", index_col=0)
 bh.index = [f"{h}:00" for h in bh.index]
 bh.columns = ["bars held", "mean", "min", "max", "portfolios"]
@@ -472,19 +854,68 @@ table(bh, 3)
 ```
 
 ```{python}
-hold = pd.read_csv(RM / "bias_test_hourly_holding.csv", index_col=0)
-idx_b = hold.loc[hold["group"] == "index/active", "bias_stat"]
-Markdown(f"In this test {int(hold['within_ci'].sum())} of {len(hold)} portfolios are inside the 95% band "
-         f"({hold['ci_low'].median():.2f}–{hold['ci_high'].median():.2f}; it is narrower here because each portfolio has "
-         f"{int(hold['n'].median()):,} test periods). The mean absolute deviation from 1 is "
-         f"{(hold['bias_stat'] - 1).abs().mean():.3f}. Two things stand out: the overnight hold from 15:00 has a mean "
-         f"bias of {bh.loc['15:00', 'mean']:.2f}, and the three index portfolios sit at "
-         f"{idx_b.min():.2f}–{idx_b.max():.2f}. Both are above 1, so the model understates those risks by "
-         f"a few percent. Summing the two bars of the overnight hold ignores any correlation between them, "
-         f"which is the likely cause; it has not been corrected.")
+#| tbl-cap: "Next-bar test, bias statistic by the bar being forecast."
+z = pd.read_parquet(RM / "bias_test_z_hourly.parquet")
+nxt = {t: model.forward_hours(t, 1)[0] for t in z["date"].unique()}
+z["target"] = z["date"].map(nxt)
+per = z.groupby(["target", "portfolio"])["z"].std().reset_index()
+per["group"] = per["portfolio"].map(group_of)
+tb = per.pivot_table(index="target", columns="group", values="z")
+tb["kurtosis of z (3 = normal)"] = z.groupby("target")["z"].apply(lambda s: s.kurtosis() + 3)
+tb.index = [f"{h}:00" for h in tb.index]
+tb.index.name = "bar being forecast"
+table(tb, 2)
 ```
 
-## 9. Point in time
+**What is still off, and why.**
+
+```{python}
+idx_b = hold.loc[hold.index.map(group_of) == "index / active", "bias_stat"]
+Markdown(f"- **Multi-bar holds are under-predicted by a few percent.** The overnight hold from 15:00 has a mean bias of "
+         f"{bh.loc['15:00', 'mean']:.2f} and the one-day test averages {h7['bias_stat'].mean():.2f}; the index portfolios "
+         f"sit at {idx_b.min():.2f}–{idx_b.max():.2f} in the holding-period test. This is not correlation between bars "
+         f"(section 9.4 shows that goes the other way). A forecast made now is used for bars several hours ahead, and "
+         f"volatility that jumps in between is not in it. It is not corrected.\n"
+         f"- **Some bars of the day are harder than others.** The table above shows each group by bar. The z-scores "
+         f"have fat tails everywhere (kurtosis well above 3), which is typical of intraday returns around scheduled "
+         f"news.\n"
+         f"- **On a typical bar the model is cautious.** The median absolute z-score is "
+         f"{z['z'].abs().median() / 0.6745:.2f} of what a correct normal model would give: most bars are quieter than "
+         f"predicted, and a few news-driven bars are much louder. The bias statistic averages over both.")
+```
+
+# 11. Every setting, and how it was chosen
+
+```{python}
+rows = [
+    ("Universe and dates", "END_DATE", str(common.END_DATE.date()), "Last date used", "Last JKP month-end; team decision"),
+    ("", "TRAIN_END", str(TRAIN_END.date()), "Last date any choice may look at", "Two years before the end date"),
+    ("", "MAX_STALE_DAYS", common.MAX_STALE_DAYS, "Oldest exposures that may be used (days)", "One month plus slack"),
+    ("Returns", "THIN_BAR_FRAC", common.THIN_BAR_FRAC, "A bar with fewer stocks than this share of the day's fullest is after-hours", "Separates half-day bars cleanly (4 bars vs 7)"),
+    ("", "MAX_ABS_RET", common.MAX_ABS_RET, "Data-error guard on a single-bar return", "Above any real move in the data"),
+    ("Factors", "style factors", len(styles), "Number of style factors (K)", "PCA table: 12 components cover ~94%"),
+    ("", "min coverage", "90%", "Data a characteristic needs to be a candidate", "Drops 14 of 153"),
+    ("", "winsorize", "3 sd", "Bound on a characteristic before standardizing", "Barra convention"),
+    ("", "MIN_SECTOR", common.MIN_SECTOR, "Stocks a sector needs to be a factor", "Fewer cannot pin down a factor return"),
+    ("Regression", "weights", "sqrt(cap)", "Regression weights, scaled to mean 1", "Barra convention"),
+    ("", "ridge", "1e-4", "Penalty on all coefficients but the market", "Numerical safety only"),
+    ("", "FIT_CLIP_SD", fr_mod.FIT_CLIP_SD, "Robust sd at which returns are clipped for the fit", "Rarely binds; protects sector returns"),
+    ("", "min stocks", "3 per regressor", "Below this a bar is skipped", "Never binds"),
+    ("Coverage", "window", "252 days", "History for tier-2 betas", "One year"),
+    ("", "MIN_BARS", f"{cov_mod.MIN_BARS // 7} days", "Least history for a tier-2 beta", "Below it, tier 3"),
+    ("", "MIN_STAGE2", cov_mod.MIN_STAGE2, "Stocks a bar needs for a second-stage sector return", "Half of MIN_SECTOR"),
+    ("Covariance", "HALFLIFE_COV_DAYS", model.HALFLIFE_COV_DAYS, "Half-life of the factor covariance (trading days)", "Tuned on training years (section 9.5)"),
+    ("", "HALFLIFE_SPEC_DAYS", model.HALFLIFE_SPEC_DAYS, "Half-life of specific variance (trading days)", "Tuned on training years (section 9.5)"),
+    ("", "HALFLIFE_CORR_DAYS, HALFLIFE_VRA_DAYS, SPEC_SHRINK_Q", "off", "Barra refinements", "Tested, worse or no gain (section 9.5)"),
+    ("", "MIN_HOUR_OBS", model.MIN_HOUR_OBS, "Bars of an hour needed before using its own scale", "About five months of one bar"),
+    ("", "MIN_SPEC_OBS", model.MIN_SPEC_OBS, "Residuals a stock needs for its own specific variance", "About nine days of bars"),
+    ("", "MIN_EIGEN_RATIO", model.MIN_EIGEN_RATIO, "Floor on eigenvalues of F, as a share of the largest", "Condition number at most 1,000"),
+    ("", "warm-up", "252 bars", "History needed before the covariance is served", "36 trading days"),
+]
+Markdown(pd.DataFrame(rows, columns=["part", "setting", "value", "what it does", "how it was chosen"]).to_markdown(index=False))
+```
+
+# 12. Point in time
 
 A backtest is only honest if every number used at time $t$ could have been known at time $t$. The
 table lists what the model uses and when it becomes available.
@@ -493,61 +924,59 @@ table lists what the model uses and when it becomes available.
 |---|---|---|
 | Style exposures | after month-end $m$, until the next month-end | JKP characteristics dated $m$ |
 | Sector | same | JKP GICS at $m$, else the stock's last earlier code, else today's list (see below) |
-| Index membership | each day $d$ | the membership file's start and end dates (see below) |
+| Which stocks the model serves | each day $d$ | the membership file's start and end dates (see below) |
 | Exposures of stocks without characteristics | after $m$ | their returns strictly before $m$ |
 | Factor returns and residuals of bar $t$ | bar $t$ itself | that bar's returns and the exposures above |
 | Factor covariance and specific variance at $t$ | bars after $t$ | factor returns and residuals up to and including $t$ |
+| Half days and decision times | any date | the exchange calendar rule, known in advance |
 | Alpha target at $t$ | — it is the label, never an input | residuals after $t$, by design |
 
 **How this was verified.** By a truncation test: cut every time-stamped input off at a date $T$
-(returns, JKP characteristics, the ticker history), rebuild the entire model from the truncated
-inputs in a separate folder, and compare the result with the full build. Every exposure, factor
-return, residual, alpha target and model output dated up to $T$ must be identical. If any number
-changed, it had been computed with data from after $T$.
+(returns, JKP characteristics, JKP factor returns, the ticker history), rebuild the model from the
+truncated inputs in a separate folder, and compare the result with the full build. Every exposure,
+factor return, residual, alpha target and model output dated up to $T$ must be identical. If any
+number changed, it had been computed with data from after $T$. The list of style factors is a
+fixed, declared choice and is not re-run.
 
-| Output dated up to $T$ = 2023-06-15 | Values compared | Identical |
-|---|---:|:---:|
-| Exposures (stocks with characteristics; all stocks, tiers 1–3) | 1,257,597 | yes |
-| Factor returns, including both half-sample estimates | 663,975 | yes |
-| Second-stage Real Estate factor, including both halves | 26,559 | yes |
-| Residuals (regression stocks and covered stocks) | 8,530,364 | yes |
-| Alpha target (windows ending by $T$) | 21,872,376 | yes |
-| Served model at 5 decision times: exposures, factor covariance (next bar, holding period, one day), specific variance | 75,264 | yes |
-| **Total** | **32,426,135** | **yes** |
+| Output dated up to $T$ | Values compared, $T$ = 2023-06-15 | Values compared, $T$ = 2025-03-14 | Identical |
+|---|---:|---:|:---:|
+| Exposures (stocks with characteristics; all stocks, tiers 1–3) | 1,199,822 | 1,614,870 | yes |
+| Factor returns, including both half-sample estimates | 637,416 | 856,584 | yes |
+| Second-stage Real Estate factor, including both halves | 26,559 | 35,691 | yes |
+| Residuals (regression stocks and covered stocks) | 8,530,360 | 11,479,788 | yes |
+| Alpha target (windows ending by $T$) | 21,843,456 | 29,391,420 | yes |
+| Served model at 5 decision times: exposures, factor covariance (next bar, holding period, one day), specific variance | 72,087 | 71,957 | yes |
+| **Total** | **32,309,700** | **43,450,310** | **yes** |
 
-: Truncation test on the code in this version of the repository. {tbl-colwidths="[62,22,16]"}
+: Recorded result of the truncation test on this version of the code. One cutoff is inside the training years and one inside the hidden years. {tbl-colwidths="[46,20,20,14]"}
 
-The largest difference anywhere is below $10^{-17}$, i.e. floating-point noise. The test was
-repeated with $T$ = 2020-03-20 (11.5 million values) with the same result. It was run once as a
-check and its script is not kept in the repository; the description above is enough to repeat it.
+All 16 outputs are identical at both cutoffs; the largest difference anywhere is 9e-19 in relative terms, which is
+floating-point noise. The test is run with a separate script that is not kept in the repository;
+the description above is enough to repeat it.
 
-The audit that led to this test found three places where the code looked ahead, all now fixed: the exposure
-matrix listed stocks that would only join the index later in the month; the random half-sample
-split of the REITs depended on which of them traded later in the month; and a bar was judged
-"thin" against the fullest bar of the whole day rather than of the day so far.
+The audit that led to this test found three places where the code looked ahead, all fixed before
+the test was run: the exposure matrix listed stocks that would only join the index later in the
+month; the random half-sample split of the REITs depended on which of them traded later in the
+month; and a bar was judged "thin" against the fullest bar of the whole day rather than of the
+day so far. The test itself then caught a fourth that reading the code had missed: the random
+half-sample split in the regression picked stocks by row position, and the row order came from a
+sort over the whole dataset, so it changed when later data was removed. Rows are now put in a
+fixed order within each bar before the split.
 
-The test itself then caught a fourth that reading the code had missed. The random half-sample
-split in the regression picked stocks by row position, and the row order came from a sort over
-the whole dataset, so it changed when later data was removed. Factor returns and residuals were
-unaffected, but the two half-sample estimates were not, and through them neither was the factor
-covariance (differences as large as 11% of the largest entry). Rows are now put in a fixed order
-within each bar before the split.
-
-**What is not point in time.** Three inputs have no time dimension, so truncation cannot test
+**What is not point in time.** These inputs have no time dimension, so truncation cannot test
 them. They are known and stated here:
 
 - **Index membership** (`sp500_universe_early_end.csv`). Each membership is ended one year before
-  the stock actually left, a team assumption to avoid trading names close to a merger. It is
-  built with knowledge of who leaves, and it removes the last year of stocks that were dropped
-  for poor performance. A ticker rename is also treated as an exit, so a renamed company is
-  missing for the year before its rename.
+  the stock actually left. It is built with knowledge of who leaves, and it removes the last year
+  of stocks that were dropped for poor performance. A ticker rename is also treated as an exit.
 - **Sector, for stocks JKP has no code for** (`sp500_instrument.csv`). Today's classification is
   applied to the past.
-- **Fixed definitions and constants**: JKP's clusters and directions, the half-lives and
-  thresholds in the code. The half-lives were checked on the training years only (section 10).
+- **Fixed definitions and constants**: JKP's directions, the list of style factors (chosen on the
+  training years only), the half-lives and thresholds of section 11 (tuned on the training years
+  only).
 
 ```{python}
-#| tbl-cap: "Where the sector of each stock-month comes from (S&P 500 members)."
+#| tbl-cap: "Where the sector of each stock-month comes from."
 src = exp[exp["in_sp500"]].groupby("sector_src").size()
 src = (100 * src / src.sum()).rename("% of stock-months").to_frame()
 src.index = src.index.map({"jkp": "JKP GICS for that month (point in time)",
@@ -558,33 +987,81 @@ table(src.sort_values("% of stock-months", ascending=False), 1)
 ```
 
 Where both a JKP code and today's list exist for the same stock-month, they disagree on 8% of
-2018 rows, about 1% in 2023 and under 0.5% after. So the non-point-in-time sector affects one or two
-stock-months in a hundred early in the sample and almost none late. A historical GICS file
-(Compustat) would remove it.
+2018 rows, about 1% in 2023 and under 0.5% after (recorded result). So the non-point-in-time
+sector affects one or two stock-months in a hundred early in the sample and almost none late. A
+historical GICS file (Compustat) would remove it.
 
-## 10. Known limits
+# 13. How this differs from Barra
 
-- **The model ends in mid-February 2026.** JKP characteristics stop at 2025-12-31 and exposures
-  older than 45 days are refused. Later bars have no exposures, residuals or targets.
-- **The half-lives are only loosely pinned down.** On the training years alone (bias test through
-  2024-11-10, 319 bars per portfolio), covariance half-lives of 5, 10, 21 and 42 days give a mean
-  distance of the bias statistic from 1 of 0.060, 0.056, 0.056 and 0.058, and specific-variance
-  half-lives of 42, 63, 126 and 252 days give 0.050, 0.052, 0.056 and 0.060. The test cannot
-  separate these, so the current 10 and 126 are kept; they are not tuned optima. (These figures were
-  measured before the point-in-time changes of section 9 and have not been re-run since.)
-- **Market cap of tier-2/3 stocks is approximate** (the sector's median), because JKP has no
-  market cap for them. It only affects cap-weighted benchmark weights.
-- **Membership and part of the sector data are not point in time** (section 9). Both are inputs
-  from outside the risk model and are not corrected here.
-- **CRSP's name history ends 2024-12-31.** A ticker that changed after that (for example a 2025
-  rename) is not linked to its JKP characteristics, so the stock is covered through its returns
-  (tier 2) instead; and a ticker passing to a different company after that date is not detected.
+Barra figures are for the US model (USE4, short-horizon version) as described in MSCI's
+methodology notes; check them before quoting.
 
-## 11. How to run
+| Aspect | Barra | This model | Why |
+|---|---|---|---|
+| Stocks used for estimation | ~2,500–3,000 US stocks | ~450 S&P 500 stocks | Hourly bars exist only for these |
+| Industry factors | 60 industries, multiple membership | 12 sectors, one per stock | 60 is too many for 450 stocks |
+| Style factors | 12 fixed blends of descriptors | 12 single characteristics chosen by PCA | Team decision |
+| Overlap between styles | Removed by regression | Not removed | Overlaps are small (largest exposure correlation 0.65) |
+| Missing characteristic | Filled by regression | 0, the average stock | Simpler; coverage is above 90% |
+| Exposure updates | Daily | Monthly | JKP publishes monthly |
+| Stocks without fundamentals | In the model with their industry | Return-based betas, plus a second-stage Real Estate factor | JKP drops REITs |
+| Regression frequency | Daily | Every hourly bar | The target is hourly |
+| Weights and constraint | $\sqrt{\text{cap}}$; industry returns sum to zero | Same | — |
+| Volatility / correlation half-life | 84 / 504 days | 10 days for both | Tested: longer is worse here (9.5) |
+| Correlation between periods | Newey-West correction | None | It is negative here; a correction would lower risk (9.4) |
+| Volatility regime adjustment | Yes | Tested, off | Worse here (9.5) |
+| Estimation noise | Eigenvalue adjustment by simulation | Split-half covariance and an eigenvalue floor | Same purpose |
+| Time of day | Not applicable | Per-hour volatility scaling | Required for hourly bars |
+| Specific risk half-life | 84 days | 42 days | Tuned (9.5) |
+| Specific risk shrinkage | Toward size peers | Tested, off | No gain (9.5) |
+| Forecast horizon | One month | One bar, the holding period, or one day | The book trades hourly |
+| Validation | Bias statistics, rolling windows | Bias statistics by group, year, decision time and bar; truncation test | — |
+
+# 14. Known limits
+
+- **Exposures are monthly, and two style factors move fast.** `ret_1_0` and `rmax5_rvol_21d` are
+  built from the last month of returns, so by the end of a month their values are stale.
+- **One style factor is weak.** `kz_index` has no value for about 7% of stock-months and the
+  lowest t-statistics of the set. It is kept because the selection picked it.
+- **The style list is sample-dependent** (section 4.1).
+- **Multi-bar holds are under-predicted by a few percent** (section 10).
+- **The model ends on `{python} str(common.END_DATE.date())`**, the last month-end JKP has
+  characteristics for; move `END_DATE` when newer JKP data is downloaded.
+- **About 20 index members a day are not covered**, because the membership file ends each
+  membership a year early and treats renames as exits (section 3.3).
+- **Market cap of tier-2/3 stocks is approximate** (the sector's median).
+- **CRSP's name history ends 2024-12-31.** A ticker that changed after that is not linked to its
+  JKP characteristics, so the stock is covered through its returns (tier 2) instead; and a ticker
+  passing to a different company after that date is not detected.
+- **Half-day and holiday rules are coded, not read from an exchange calendar.** They match all
+  `{python} int((nb == 4).sum())` half days in the data; an unscheduled early close would not be
+  recognized.
+
+# 15. Files and how to run
+
+| Output (`data/riskmodel/` unless noted) | Written by | What it holds |
+|---|---|---|
+| `data/jkp/style_factors.csv`, `style_factors_pca.csv` | `factor_selection.py` | The chosen style factors and the PCA table |
+| `exposures.parquet` | `exposures.py` | Tier-1 exposures: one row per stock-month |
+| `factor_returns_hourly.parquet` | `factor_returns.py` | Factor returns, one row per bar |
+| `factor_returns_halfA/B_hourly.parquet` | `factor_returns.py` | The two half-sample estimates |
+| `residuals_hourly.parquet` | `factor_returns.py` | Residuals of tier-1 stocks |
+| `factor_summary_hourly.csv` | `factor_returns.py` | Volatility and t-statistics per factor |
+| `exposures_covered.parquet` | `coverage.py` | Exposures of all stocks, tiers 1–3 (the model reads this) |
+| `residuals_covered_hourly.parquet` | `coverage.py` | Residuals of tier-2/3 stocks |
+| `factor_returns_stage2*_hourly.parquet` | `coverage.py` | The second-stage sector factor and its halves |
+| `coverage_report.csv` | `coverage.py` | Stocks per tier, per month |
+| `alpha_target_1d.parquet` | `alpha_target.py` | The 1-day residual target |
+| `bias_test_hourly*.csv`, `bias_test_z_hourly.parquet` | `bias_test.py` | Validation results |
 
 ```bash
-python Python/riskmodel/pipeline.py --validate      # all steps + bias test
-python Python/riskmodel/pipeline.py --from coverage # resume from a step
-python Python/riskmodel/model.py                    # self-test of the served model
-python Python/riskmodel/bias_test.py --holding --every 6   # bias test on the real holding periods
+python Python/riskmodel/pipeline.py --validate              # all steps + next-bar bias test
+python Python/riskmodel/pipeline.py --from coverage         # resume from a step
+python Python/riskmodel/bias_test.py --holding --every 1    # bias test on the real holding periods (about an hour;
+                                                            # or one year at a time with --start / --end)
+python Python/riskmodel/bias_test.py --horizon-bars 7 --every 8   # bias test on one-day holds
+python Python/riskmodel/model.py                            # self-test of the served model
 ```
+
+The first command takes about six minutes; the factor choice is its first step and is fast. The
+notebook reads the outputs of the first, third and fourth commands.

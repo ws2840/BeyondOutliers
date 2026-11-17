@@ -2,23 +2,20 @@
 """
 Build the risk model's exposure matrix B.
 
-Instead of using the 153 JKP characteristics as 153 separate factors (which is not
-estimable on a ~457-stock S&P 500 cross-section, and whose covariance has a condition
-number of ~4e5), this aggregates all 153 into the 13 clusters JKP defines. Each cluster
-becomes one composite style factor, so every characteristic contributes but the factor
-set stays well conditioned and interpretable. This is the descriptor -> style-factor
-aggregation used by commercial risk models (Barra, Axioma).
+STYLE FACTORS. Each style factor is one ORIGINAL JKP characteristic, used as JKP provides it.
+Which ones is decided once by factor_selection.py (PCA on the training years) and read here
+from data/jkp/style_factors.csv. Per month-end, across the S&P 500 stocks, each chosen
+characteristic is
 
-Per month-end, for each of the 153 characteristics:
-    winsorize at +-3 sd  ->  cap-weighted z-score (mean 0, sd 1)  ->  x JKP `direction`
-Then per cluster: average the signed z-scores a stock actually has (missing ones are
-skipped, not treated as 0), and re-z-score the composite.
+    winsorized at +-3 sd  ->  standardized to cap-weighted mean 0, sd 1  ->  x JKP `direction`
 
-DIRECTION. JKP's clusters group characteristics whose SIGNED long-short returns move
-together, and most clusters mix signs: Size holds market_equity (-1) next to ami_126d (+1),
-Value holds 14 positive and 4 negative. Averaging raw z-scores lets those cancel. Each
-z-score is therefore multiplied by its `direction` from factor_meta.csv first, so a high
-composite always means "more of what the cluster is named after".
+and a stock with no value gets 0, the average stock. This is the standardization commercial
+risk models use (Barra): cap-weighted centring makes the index itself style-neutral, so the
+market factor carries the market.
+
+DIRECTION. JKP signs every characteristic so that a high value is the side its factor return
+is long (market_equity is -1: the size factor is long SMALL stocks). Multiplying by it keeps
+each exposure pointing the same way as JKP's published factor of the same name.
 
 IDENTITY. Each row is resolved to `key`, the normalized ticker of the S&P 500 member it is
 (BRK + class B -> BRKB), which is what returns, residuals and the optimizer's weights are
@@ -42,7 +39,7 @@ exposures (model.py) on the same definition.
 
 Output: data/riskmodel/exposures.parquet
     permno, eom, ticker, ticker_cls, key, me, in_sp500, sector, sector_src, sector_model,
-    <13 cluster composites>
+    <one column per style factor, named after its JKP characteristic>
 
 Run (from repo root):
     python Python/riskmodel/exposures.py
@@ -59,9 +56,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from market_data.global_factor_common import ALL_PATH, REDUCED_PATH, load_meta  # noqa: E402
 
 try:
-    from riskmodel.common import ROOT, INSTRUMENT_PATH, MEMBERSHIP_PATH, GICS_SECTORS, MIN_SECTOR, norm_ticker
+    from riskmodel.common import (ROOT, INSTRUMENT_PATH, MEMBERSHIP_PATH, STYLE_PATH, GICS_SECTORS, MIN_SECTOR,
+                                  norm_ticker)
 except ImportError:
-    from common import ROOT, INSTRUMENT_PATH, MEMBERSHIP_PATH, GICS_SECTORS, MIN_SECTOR, norm_ticker
+    from common import ROOT, INSTRUMENT_PATH, MEMBERSHIP_PATH, STYLE_PATH, GICS_SECTORS, MIN_SECTOR, norm_ticker
 
 OUT_PATH = ROOT / "data" / "riskmodel" / "exposures.parquet"
 
@@ -75,22 +73,51 @@ def zscore_month(X: pd.DataFrame, cap: pd.Series) -> pd.DataFrame:
     return (X - wmu) / X.std().replace(0, np.nan)
 
 
-def cluster_composites(panel: pd.DataFrame, clusters: dict[str, list[str]],
-                       direction: pd.Series) -> pd.DataFrame:
-    """One composite exposure per cluster per month: mean of the signed z-scores present, re-z-scored."""
-    cols = [c for members in clusters.values() for c in members]
-    sign = direction.reindex(cols).astype(float)
+def style_exposures(panel: pd.DataFrame, styles: list[str], direction: pd.Series) -> pd.DataFrame:
+    """Each chosen characteristic, standardized within the month and signed. Missing -> 0."""
+    sign = direction.reindex(styles).astype(float)
     out = []
-    for eom, g in panel.groupby("eom", sort=True):
-        cap = g["me"].astype(float)
-        Z = zscore_month(g[cols].astype(float), cap) * sign      # orient every characteristic
-        comp = pd.DataFrame(index=g.index)
-        for name, members in clusters.items():
-            comp[name] = Z[members].mean(axis=1, skipna=True)    # skip missing, don't zero-fill
-        comp = zscore_month(comp, cap).fillna(0.0)               # re-standardize, then missing -> average stock
-        comp.insert(0, "eom", eom)
-        out.append(comp)
-    return pd.concat(out)
+    for _, g in panel.groupby("eom", sort=True):
+        out.append((zscore_month(g[styles].astype(float), g["me"].astype(float)) * sign).fillna(0.0))
+    return pd.concat(out).reindex(panel.index)
+
+
+def load_panel(characteristics: list[str], verbose: bool = True) -> pd.DataFrame:
+    """JKP stock-months with the given characteristics, each row resolved to the index member it is.
+
+    Adds ticker, ticker_cls, key and in_sp500 (see IDENTITY). Rows keep JKP's `gics` and `me`.
+    """
+    id_cols = ["permno", "eom", "me", "gics", "ff49"]      # all.parquet has no ticker column
+    src = pd.read_parquet(ALL_PATH, columns=list(dict.fromkeys(id_cols + list(characteristics))))
+    src["eom"] = pd.to_datetime(src["eom"])
+    src = src[src["permno"].notna() & src["me"].notna() & (src["me"] > 0)].reset_index(drop=True)
+    src["permno"] = src["permno"].astype(int)
+
+    # tickers are attached during the reduce step; bring them over on (permno, eom)
+    tick = pd.read_parquet(REDUCED_PATH, columns=["permno", "eom", "ticker", "ticker_cls"])
+    tick["eom"] = pd.to_datetime(tick["eom"])
+    tick = tick[tick["permno"].notna()]
+    tick["permno"] = tick["permno"].astype(int)
+    src = src.merge(tick.drop_duplicates(["permno", "eom"]), on=["permno", "eom"], how="left")
+
+    src["key"] = sp500_key(src)
+    src["in_sp500"] = src["key"] != ""
+    # two share classes of one company can both match the same member: keep the larger
+    dup = src["in_sp500"] & src.duplicated(["eom", "key"], keep=False)
+    if dup.any():
+        best = src[dup].sort_values("me", ascending=False).drop_duplicates(["eom", "key"]).index
+        lose = src.index[dup].difference(best)
+        if verbose:
+            print(f"{len(lose):,} rows are a second share class of an index member "
+                  f"({', '.join(sorted(src.loc[lose, 'key'].unique()))}); the larger class is kept")
+        src.loc[lose, ["key", "in_sp500"]] = ["", False]
+    not_member = ~src["in_sp500"]
+    src.loc[not_member, "key"] = norm_ticker(src.loc[not_member, "ticker_cls"].fillna("")).to_numpy()
+    if verbose:
+        print(f"ticker attached for {src['ticker'].notna().mean():.1%} of rows")
+        print(f"panel: {len(src):,} rows, {src['eom'].nunique()} month-ends, "
+              f"{src['eom'].min().date()} -> {src['eom'].max().date()}")
+    return src
 
 
 def attach_sector(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
@@ -119,22 +146,26 @@ def attach_sector(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
 def sp500_key(df: pd.DataFrame) -> pd.Series:
     """The S&P 500 member each row is at eom, as a normalized ticker; "" if it is not one.
 
-    A row is tried under ticker + share class first (BRK + B -> BRKB), then under the bare
-    ticker, so a class-specific listing wins over the bare ticker.
+    A row is matched under its bare CRSP ticker. Ticker + share class (BRK + B -> BRKB) is tried
+    only against members that are themselves written with a class (BRK.B, BF.B). Without that
+    restriction the concatenation invents matches: Mastercard is ticker MA, class A, and "MAA"
+    is Mid-America Apartment; Pluralsight is PS, class A, and "PSA" is Public Storage.
     """
     out = pd.Series("", index=df.index, dtype=object)
     if not MEMBERSHIP_PATH.exists() or "ticker" not in df.columns:
         return out
     m = pd.read_csv(MEMBERSHIP_PATH, parse_dates=["start_date", "end_date"])
     m["key"] = norm_ticker(m["ticker"])
+    m["has_class"] = m["ticker"].astype(str).str.contains(r"[.\-/]", regex=True)
     cand = [pd.DataFrame({"key": norm_ticker(df[c].fillna("")).to_numpy(), "eom": df["eom"].to_numpy(),
-                          "row": np.arange(len(df)), "prio": p})
-            for p, c in enumerate(("ticker_cls", "ticker")) if c in df.columns]
+                          "row": np.arange(len(df)), "with_class": c == "ticker_cls"})
+            for c in ("ticker", "ticker_cls") if c in df.columns]
     x = pd.concat(cand)
     x = x[x["key"] != ""]
-    j = x.merge(m[["key", "start_date", "end_date"]], on="key", how="inner")
+    j = x.merge(m[["key", "start_date", "end_date", "has_class"]], on="key", how="inner")
     j = j[(j["start_date"] <= j["eom"]) & (j["end_date"].isna() | (j["end_date"] > j["eom"]))]
-    j = j.sort_values(["row", "prio"]).drop_duplicates("row", keep="first")
+    j = j[j["with_class"] == j["has_class"]]             # bare ticker <-> plain member, ticker+class <-> classed member
+    j = j.sort_values(["row", "with_class"]).drop_duplicates("row", keep="first")
     out.iloc[j["row"].to_numpy()] = j["key"].to_numpy()
     return out
 
@@ -160,43 +191,16 @@ def main():
     p.add_argument("--out", default=str(OUT_PATH))
     a = p.parse_args()
 
-    meta = load_meta()
-    clusters = {c: sorted(g["factor"]) for c, g in meta.groupby("cluster")}
-    direction = meta.set_index("factor")["direction"]
-    print(f"{len(meta)} characteristics -> {len(clusters)} cluster composites")
-    for c, cols in sorted(clusters.items(), key=lambda kv: -len(kv[1])):
-        d = direction.reindex(cols)
-        print(f"  {c:22s} {len(cols):3d}   ({int((d > 0).sum())} positive, {int((d < 0).sum())} negative direction)")
+    if not STYLE_PATH.exists():
+        sys.exit(f"{STYLE_PATH} not found: run `python Python/riskmodel/factor_selection.py` first")
+    chosen = pd.read_csv(STYLE_PATH)
+    styles = chosen["factor"].tolist()
+    direction = load_meta().set_index("factor")["direction"]
+    print(f"{len(styles)} style factors from {STYLE_PATH.name}:")
+    for f, d, desc in zip(chosen["factor"], chosen["direction"], chosen["description"]):
+        print(f"  {f:18s} {'+' if d > 0 else '-'}  {desc}")
 
-    id_cols = ["permno", "eom", "me", "gics", "ff49"]      # all.parquet has no ticker column
-    src = pd.read_parquet(ALL_PATH, columns=list(dict.fromkeys(id_cols + meta["factor"].tolist())))
-    src["eom"] = pd.to_datetime(src["eom"])
-    src = src[src["permno"].notna() & src["me"].notna() & (src["me"] > 0)].reset_index(drop=True)
-    src["permno"] = src["permno"].astype(int)
-
-    # tickers are attached during the reduce step; bring them over on (permno, eom)
-    tick = pd.read_parquet(REDUCED_PATH, columns=["permno", "eom", "ticker", "ticker_cls"])
-    tick["eom"] = pd.to_datetime(tick["eom"])
-    tick = tick[tick["permno"].notna()]
-    tick["permno"] = tick["permno"].astype(int)
-    src = src.merge(tick.drop_duplicates(["permno", "eom"]), on=["permno", "eom"], how="left")
-    print(f"ticker attached for {src['ticker'].notna().mean():.1%} of rows")
-    print(f"\npanel: {len(src):,} rows, {src['eom'].nunique()} month-ends, "
-          f"{src['eom'].min().date()} -> {src['eom'].max().date()}")
-
-    src["key"] = sp500_key(src)
-    src["in_sp500"] = src["key"] != ""
-    # two share classes of one company can both match the same member: keep the larger
-    dup = src["in_sp500"] & src.duplicated(["eom", "key"], keep=False)
-    if dup.any():
-        best = src[dup].sort_values("me", ascending=False).drop_duplicates(["eom", "key"]).index
-        lose = src.index[dup].difference(best)
-        print(f"{len(lose):,} rows are a second share class of an index member "
-              f"({', '.join(sorted(src.loc[lose, 'key'].unique()))}); the larger class is kept")
-        src.loc[lose, ["key", "in_sp500"]] = ["", False]
-    not_member = ~src["in_sp500"]
-    src.loc[not_member, "key"] = norm_ticker(src.loc[not_member, "ticker_cls"].fillna("")).to_numpy()
-
+    src = load_panel(styles)
     src["sector"], src["sector_src"] = attach_sector(src)
     if a.universe == "sp500":
         src = src[src["in_sp500"]].reset_index(drop=True)
@@ -208,19 +212,22 @@ def main():
     last = src[src["in_sp500"] & (src["eom"] == src["eom"].max())]
     print(f"sector factors at {src['eom'].max().date()}: "
           + ", ".join(f"{s or '(none)'} {n}" for s, n in last["sector_model"].value_counts().sort_index().items()))
+    missing = src.loc[src["in_sp500"], styles].isna().mean()
+    print("share of S&P 500 stock-months with no value (set to 0): "
+          + (", ".join(f"{f} {v:.1%}" for f, v in missing[missing > 0.005].items()) or "none above 0.5%"))
 
-    comp = cluster_composites(src, clusters, direction)
+    X = style_exposures(src, styles, direction)
     out = pd.DataFrame({"permno": src["permno"], "eom": src["eom"], "ticker": src["ticker"],
                         "ticker_cls": src["ticker_cls"], "key": src["key"], "me": src["me"].astype(float),
                         "in_sp500": src["in_sp500"], "sector": src["sector"],
                         "sector_src": src["sector_src"], "sector_model": src["sector_model"]})
-    out = pd.concat([out, comp.drop(columns="eom")], axis=1)
+    out = pd.concat([out, X], axis=1)
 
     path = Path(a.out)
     path.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(path, index=False, compression="zstd")
     print(f"\nsaved {path}: {out.shape[0]:,} rows x {out.shape[1]} cols")
-    return out, clusters
+    return out, styles
 
 
 if __name__ == "__main__":

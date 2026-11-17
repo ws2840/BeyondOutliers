@@ -52,9 +52,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from riskmodel import model  # noqa: E402
 
 try:
-    from riskmodel.common import RM_DIR, BARS_PER_DAY, DECISION_HOURS, load_hourly_returns
+    from riskmodel.common import RM_DIR, BARS_PER_DAY, is_decision_time, load_hourly_returns
 except ImportError:
-    from common import RM_DIR, BARS_PER_DAY, DECISION_HOURS, load_hourly_returns
+    from common import RM_DIR, BARS_PER_DAY, is_decision_time, load_hourly_returns
 
 WARMUP = 252          # trading days of factor-return history before the first test
 
@@ -72,8 +72,8 @@ def test_portfolios(B: pd.DataFrame, tilts: pd.DataFrame, sectors: list[str], rn
                     n_random: int) -> dict[str, pd.Series]:
     """Weight vectors on B.index. Long-short books are demeaned and scaled to unit gross.
 
-    `tilts` carries ALL 13 cluster composites, including ones dropped from the factor set.
-    A portfolio tilted on a dropped cluster still has real risk; the model should now capture
+    `tilts` carries every style exposure, including any dropped from the factor set.
+    A portfolio tilted on a dropped style still has real risk; the model should now capture
     it through specific risk instead of a factor, and the bias test checks whether it does.
     """
     idx = B.index
@@ -109,6 +109,12 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--halflife", type=float, default=None,
                    help="EWMA halflife in trading DAYS for the factor covariance (default: model.py)")
+    p.add_argument("--corr-halflife", type=float, default=None,
+                   help="EWMA halflife in trading DAYS for the factor correlations (default: model.py; 0 = same as --halflife)")
+    p.add_argument("--vra-halflife", type=float, default=None,
+                   help="halflife in trading DAYS of the volatility regime adjustment (default: model.py; 0 = off)")
+    p.add_argument("--spec-shrink", type=float, default=None,
+                   help="strength of the specific-risk shrinkage toward size peers (default: model.py; 0 = off)")
     p.add_argument("--spec-halflife", type=float, default=None,
                    help="EWMA halflife in trading DAYS for specific variance (default: model.py)")
     p.add_argument("--start", default=None, help="first test date (default: after the warm-up)")
@@ -138,7 +144,7 @@ def main():
     if a.end:
         dates = [d for d in dates if d < pd.Timestamp(a.end) + pd.Timedelta(1, unit="D")]
     if a.holding:
-        dates = [d for d in dates if d.hour in DECISION_HOURS]
+        dates = [d for d in dates if is_decision_time(d)]
     test_dates = dates[::a.every]
     print(f"bias test ({a.freq}) on {len(test_dates):,} periods, {test_dates[0]} -> {test_dates[-1]} "
           f"(every {a.every})")
@@ -151,8 +157,9 @@ def main():
     print(f"sector factors: {len(sectors)} ({', '.join(sectors)})")
     dropped = [c for c in styles if c not in names]
     if dropped:
-        print(f"also testing tilts on {len(dropped)} dropped composites: {', '.join(dropped)}")
+        print(f"also testing tilts on {len(dropped)} dropped styles: {', '.join(dropped)}")
     raw = model._exposures()
+    ckw = {"halflife_days": a.halflife, "corr_halflife_days": a.corr_halflife, "vra_halflife_days": a.vra_halflife}
     rows = []
     for t in test_dates:
         hb = model.holding_bars(t, a.freq) if a.holding else a.horizon_bars
@@ -165,14 +172,13 @@ def main():
         try:
             B = model.exposures(t, freq=a.freq)
             if hb == 1:
-                S = model.cov(t, freq=a.freq, target_hour=th, halflife_days=a.halflife).to_numpy()
-                D = model.specific_var(t, freq=a.freq, target_hour=th, index=B.index,
-                                       halflife_days=a.spec_halflife).to_numpy()
+                S = model.cov(t, freq=a.freq, target_hour=th, **ckw).to_numpy()
+                D = model.specific_var(t, freq=a.freq, target_hour=th, index=B.index, me=B["me"],
+                                       halflife_days=a.spec_halflife, shrink_q=a.spec_shrink).to_numpy()
             else:   # position held several bars: sum each bar's own covariance
-                S = model.cov_span(t, hb, freq=a.freq,
-                                   halflife_days=a.halflife).to_numpy()
-                D = model.specific_var_span(t, hb, freq=a.freq, index=B.index,
-                                            halflife_days=a.spec_halflife).to_numpy()
+                S = model.cov_span(t, hb, freq=a.freq, **ckw).to_numpy()
+                D = model.specific_var_span(t, hb, freq=a.freq, index=B.index, me=B["me"],
+                                            halflife_days=a.spec_halflife, shrink_q=a.spec_shrink).to_numpy()
         except ValueError:
             continue
 
@@ -229,7 +235,9 @@ def main():
     out["group"] = [grp(s) for s in out.index]
     out = out.sort_values(["group", "portfolio"])
     tag = a.freq + ("_holding" if a.holding else f"_h{a.horizon_bars}" if a.horizon_bars != 1 else "") \
-          + (f"_hl{a.halflife:g}" if a.halflife else "") + (f"_shl{a.spec_halflife:g}" if a.spec_halflife else "") \
+          + (f"_hl{a.halflife:g}" if a.halflife else "") + (f"_chl{a.corr_halflife:g}" if a.corr_halflife else "") \
+          + (f"_vra{a.vra_halflife:g}" if a.vra_halflife else "") + (f"_shl{a.spec_halflife:g}" if a.spec_halflife else "") \
+          + (f"_q{a.spec_shrink:g}" if a.spec_shrink else "") \
           + (f"_to{pd.Timestamp(a.end):%Y%m%d}" if a.end else "")
     out.to_csv(Path(a.out) / f"bias_test_{tag}.csv")
 
@@ -245,9 +253,18 @@ def main():
         by_hour.insert(0, "bars_held", [model.holding_bars(pd.Timestamp(2000, 1, 3, int(h))) for h in by_hour.index])
         by_hour.round(3).to_csv(Path(a.out) / f"bias_test_{tag}_by_hour.csv")
         print("bias statistic by decision hour (mean / min / max over portfolios):\n" + by_hour.round(3).to_string() + "\n")
+    # the same statistic year by year: a model can be right on average and wrong in every regime
+    z["group"] = z["portfolio"].map(grp)
+    yearly = z.groupby(["group", "portfolio", z["date"].dt.year])["z"].std(ddof=1).rename("bias").reset_index()
+    by_year = yearly.groupby(["date", "group"])["bias"].mean().unstack("group")
+    by_year.index.name = "year"
+    by_year.round(3).to_csv(Path(a.out) / f"bias_test_{tag}_by_year.csv")
+    mrad = float((yearly["bias"] - 1).abs().mean())
+    print("bias statistic by year (mean over the portfolios of each group):\n" + by_year.round(3).to_string() + "\n")
     by_group = out.groupby("group")["bias_stat"].agg(["mean", "min", "max"]).round(3)
     print("bias statistic by group:\n" + by_group.to_string() + "\n")
     print(f"passing portfolios: {int(out['within_ci'].sum())} of {len(out)}")
+    print(f"mean |B - 1| per portfolio-YEAR: {mrad:.3f}   (the same error measured within each calendar year)")
     print(f"mean |B - 1| across portfolios: {(out['bias_stat'] - 1).abs().mean():.3f}   "
           f"(pooled over all portfolios: {z['z'].std(ddof=1):.3f} - correlated books, errors can cancel)")
     print("B>1 understates risk, B<1 overstates it, B~1 is correct")

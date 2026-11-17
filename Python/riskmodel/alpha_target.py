@@ -15,7 +15,8 @@ tomorrow 11:00, which shares 6 of its 7 bars with the 10:00 forecast.
 
 DECISION TIMES. The book does not trade in 09:30-10:00 or in 15:00-16:00, so decisions are
 made at 10:00, 11:00, 12:00, 13:00, 14:00 and 15:00 only (common.DECISION_HOURS), and only
-those rows are written. There is NO 16:00 row: nothing is traded at the close, and the next
+those rows are written. On a half day (13:00 close) the same rule gives 10:00, 11:00 and 12:00.
+There is NO 16:00 row: nothing is traded at the close, and the next
 price the book could act on is 10:00 the following day - which is already the 10:00 row.
 The 16:00 BAR is still part of every window that spans it (a 15:00 decision's target runs
 15:00 -> 15:00 and includes it); only the 16:00 DECISION is dropped.
@@ -130,7 +131,10 @@ def main():
 
     pos = next_day_positions(resid.index)
     fwd_u, fwd_r = forward_sum(resid, pos), forward_sum(raw, pos)
-    decision = resid.index.hour.isin(a.hours)                 # only times the book can trade
+    # only times the book can trade: one of --hours, and never the day's last bar (16:00, or
+    # 13:00 on a half day)
+    last_bar = pd.Series(resid.index.hour, index=resid.index).groupby(resid.index.normalize()).transform("max")
+    decision = resid.index.hour.isin(a.hours) & (resid.index.hour < last_bar.to_numpy())
     fwd_u, fwd_r = fwd_u[decision], fwd_r[decision]
     when = pd.DataFrame({"target_time": resid.index[np.maximum(pos, 0)].where(pos >= 0),
                          "n_bars": np.where(pos >= 0, pos - np.arange(len(pos)), 0)}, index=resid.index)

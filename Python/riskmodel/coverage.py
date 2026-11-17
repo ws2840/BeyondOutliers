@@ -75,10 +75,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     from riskmodel.common import (RM_DIR, INSTRUMENT_PATH, MEMBERSHIP_PATH, ID_COLS, MAX_STALE_DAYS,
-                                  MIN_SECTOR, TRADING_HOURS, norm_ticker, load_hourly_returns, members_on)
+                                  MIN_SECTOR, TRADING_HOURS, norm_ticker, load_hourly_returns, members_on,
+                                  handover_dates)
 except ImportError:
     from common import (RM_DIR, INSTRUMENT_PATH, MEMBERSHIP_PATH, ID_COLS, MAX_STALE_DAYS,
-                        MIN_SECTOR, TRADING_HOURS, norm_ticker, load_hourly_returns, members_on)
+                        MIN_SECTOR, TRADING_HOURS, norm_ticker, load_hourly_returns, members_on, handover_dates)
 
 
 BARS_PER_DAY = len(TRADING_HOURS)
@@ -151,6 +152,7 @@ def main():
     # index returns by ticker once: scanning 7M rows per stock per month is far too slow
     by_key = {k: g.set_index("period")["ret"] for k, g in R.groupby("key", sort=False)}
     window = a.window_days * BARS_PER_DAY
+    handovers = handover_dates()
 
     est = exp[exp["in_sp500"]]
     print(f"estimation universe: {len(est):,} stock-months, {len(styles)} styles")
@@ -199,11 +201,16 @@ def main():
         month_rows = []
         for key in missing:
             sec = sec_of[key]
-            prior = prior_mean.loc[sec] if sec in prior_mean.index else all_mean
+            # a sector's own median only if enough stocks stand behind it: Real Estate has one
+            # or two stocks with characteristics, and 30 REITs must not be shrunk toward those
+            prior = prior_mean.loc[sec] if sec in prior_mean.index and prior_n.loc[sec] >= MIN_SECTOR else all_mean
             pvar = (prior_sd2.loc[sec] if sec in prior_sd2.index and prior_n.loc[sec] >= MIN_SECTOR
                     else all_var).fillna(all_var).clip(lower=1e-4)
             ser = by_key.get(key)
             rw = ser[ser.index < eom] if ser is not None else pd.Series(dtype=float)
+            changed = [d for d in handovers.get(key, []) if d <= eom]
+            if changed:                                  # the ticker belonged to another company before
+                rw = rw[rw.index >= changed[-1]]
             b, nobs = tier2_betas(rw, Fwin, styles, sector_series(sec, Fwin.index), prior, pvar)
             tier = 2 if nobs >= MIN_BARS else 3
             n2 += tier == 2
