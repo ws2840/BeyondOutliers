@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 UNIVERSE_PATH = Path(__file__).resolve().parents[2] / "data" / "universe" / "sp500_universe_early_end.csv"
+INSTRUMENT_PATH = Path(__file__).resolve().parents[2] / "data" / "universe" / "sp500_instrument.csv"
 
 
 @lru_cache(maxsize=1)
@@ -28,5 +29,15 @@ def get_universe(for_date: str | date | pd.Timestamp) -> list[str]:
     return sorted(m.loc[active, "ticker"].unique())
 
 
+def get_gics_sector(tickers: list[str]) -> pd.Series:
+    """Return the GICS sector name of each ticker (index = ticker).
+
+    Taken from the current S&P 500 list (sp500_instrument.csv), so it is not point-in-time:
+    a ticker gets today's sector for every date, and tickers no longer in the index are NaN.
+    """
+    inst = pd.read_csv(INSTRUMENT_PATH)
+    return inst.set_index("Symbol")["GICS Sector"].reindex(tickers)
+
+
 if __name__ == "__main__":
-    print(len(get_universe("2024-01-02")))
+    print(get_gics_sector(['AAPL', 'NVDA']))
