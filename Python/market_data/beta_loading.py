@@ -49,7 +49,7 @@ class BetaLoadingGenerator:
         for for_date in self._eod_months:
             data = self._download_factor_data(for_date)
             loading = self._cal_beta_loading(for_date, data)
-            print('done', for_date.date(), len(data), 'stocks', loading.shape[1] - 1, 'loadings')
+            print('done', for_date.date(), len(data), 'stocks', loading.shape[1] - 1, ' factors')
 
     def _cal_beta_loading(self, for_date, data):
         """USE4 style loadings + country + GICS sector dummies, saved to data/beta_loading/<for_date>.parquet."""
@@ -86,11 +86,11 @@ class BetaLoadingGenerator:
         out["non_linear_beta"] = _standardize(_orthogonalize(out["beta"] ** 3, out["beta"], cap), cap)
         out = out.fillna(0.0)
 
+        for code, name in GICS_SECTOR.items():
+            out[f"gics_{name}"] = (d["gsector"] == code).astype(float)
         # country: 1 for every stock (USE4 eq. 3.1). It equals the sum of the sector dummies, so the factor
         # return regression needs the constraint sum_i (sector cap weight_i * sector return_i) = 0 (eq. 3.3)
         out["country"] = 1.0
-        for code, name in GICS_SECTOR.items():
-            out[f"gics_{name}"] = (d["gsector"] == code).astype(float)
 
         out_dir = DATA_DIR / "beta_loading"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +149,8 @@ class BetaLoadingGenerator:
 
 def main():
     # 1 month only for now (2018-05-31); full history is 2018-05-01 to 2025-12-31
-    beta_loading_generator = BetaLoadingGenerator("2018-05-01", "2018-06-01")
+    # beta_loading_generator = BetaLoadingGenerator("2018-05-01", "2018-06-01")
+    beta_loading_generator = BetaLoadingGenerator("2018-05-01", "2026-06-01")
     beta_loading_generator.generate()
 
 
