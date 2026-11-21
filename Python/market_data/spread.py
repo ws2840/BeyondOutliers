@@ -1,6 +1,7 @@
-"""Download daily Nasdaq BBOs and sample hourly spreads for a complete trading month."""
+"""Download daily Nasdaq BBOs and sample spreads at exact decision hours."""
 import hashlib
 import json
+import shutil
 import sqlite3
 import time
 from contextlib import closing
@@ -10,7 +11,6 @@ from tempfile import TemporaryDirectory
 
 import databento as db
 import exchange_calendars as xcals
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -27,59 +27,89 @@ UNDEF_PRICE = 2**63 - 1  # DBN price for a side with no quote
 NY = "America/New_York"
 MINUTE = timedelta(minutes=1)
 RAW_META = b"beyondoutliers_bbo"
-DEPTH = ["bid_sz_00", "ask_sz_00", "bid_ct_00", "ask_ct_00"]
 
 
-def download_spread_data(start_date="2025-01-01", end_date="2025-02-01", *, output_dir=OUTPUT_DIR, client=None) -> list[Path]:
-    """Cache Nasdaq minute BBOs for each session's universe in [start_date, end_date).
-    Reuse raw files or existing Databento orders. Submit one batch for each day still missing.
-    Return the paths to raw/YYYY-MM-DD.parquet in trading-date order.
-    """
+def download_spread_data(start_date="2025-01-01", end_date="2026-01-01", *, output_dir=OUTPUT_DIR, client=None) -> list[Path]:
+    """Cache each session's minute BBOs in YYYY-MM-DD.parquet for [start_date, end_date)."""
     start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
     if start >= end:
         raise ValueError("end_date is exclusive and must follow start_date")
     calendar = xcals.get_calendar("XNYS", start=start - timedelta(days=7), end=end + timedelta(days=7))
-    sessions = calendar.schedule.loc[start:end - timedelta(days=1)]
-    raw_dir = Path(output_dir) / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
-    missing = {}
-    for day, session in sessions.iterrows():
-        path = raw_dir / f"{day.date()}.parquet"
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    paths, missing = [], {}
+    for day, session in calendar.schedule.loc[start:end - timedelta(days=1)].iterrows():
+        path, request = _daily_raw(root, day, session)
+        target = root / path.name
+        if path != target and not target.exists():  # Promote an older raw/ cache without placing a new order.
+            with TemporaryDirectory(dir=root) as folder:
+                tmp = Path(folder) / path.name
+                shutil.copyfile(path, tmp)
+                tmp.replace(target)
+            path = target
+        if not path.exists():
+            missing[path] = request
         paths.append(path)
-        if path.exists():
-            continue
-        tickers = get_universe(day.date())
-        if not tickers:
-            raise ValueError(f"Empty universe for {day.date()}")
-        # Right-end minute labels run from 09:31 through the close; the API end is exclusive.
-        missing[path] = dict(dataset=DATASET, schema=SCHEMA, stype_in="raw_symbol", symbols=tickers,
-                             start=(session.open + MINUTE).isoformat(), end=(session.close + MINUTE).isoformat())
     if missing:
         if client is None:
             client = db.Historical()
-        _SpreadJobs(client).download(missing, raw_dir)
+        _SpreadJobs(client).download(missing, root)
     return paths
 
 
-def build_hour_bar_spread(month="2025-01", *, output_dir=OUTPUT_DIR) -> Path:
-    """Sample the last same-session BBO for each ticker at each hourly decision, 10:00–15:00 New York.
-    Read local raw files and return the path to monthly/YYYY-MM.parquet. Early closes stop at 12:00.
-    """
-    period = pd.Period(month, freq="M")
+def build_hour_bar_spread(year=2025, *, month=None, output_dir=OUTPUT_DIR) -> Path:
+    """Build 1h_bar.parquet from exact minute BBOs. Replace only the requested year or month."""
+    selection = str(month if month is not None else year)
+    period = pd.Period(selection, freq="Y" if len(selection) == 4 else "M")
     calendar = xcals.get_calendar("XNYS", start=period.start_time, end=period.end_time.normalize())
-    daily_bars = []
+    root = Path(output_dir)
+    daily = []
     for day, session in calendar.schedule.iterrows():
-        raw_path = Path(output_dir) / "raw" / f"{day.date()}.parquet"
-        tickers, book = _read_session_book(raw_path, day, session)
-        daily_bars.append(_hourly_spreads(book, tickers, session))
-    path = Path(output_dir) / "monthly" / f"{period}.parquet"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(dir=path.parent) as folder:
-        tmp = Path(folder) / "hourly.parquet"
-        pd.concat(daily_bars, ignore_index=True).to_parquet(tmp, index=False, compression="zstd")
-        tmp.replace(path)
+        raw, request = _daily_raw(root, day, session)
+        daily.append(_hourly_spreads(raw, session, request["symbols"]))
+    bars = pd.concat(daily, ignore_index=True)
+
+    path = root / "1h_bar.parquet"
+    # Serialize range replacements so two concurrent monthly runs preserve each other's rows.
+    with closing(sqlite3.connect(root / "jobs.sqlite3", timeout=30)) as journal, journal:
+        journal.execute("BEGIN IMMEDIATE")
+        if path.exists():
+            previous = pd.read_parquet(path)
+            start, end = period.start_time.tz_localize(NY), (period + 1).start_time.tz_localize(NY)
+            keep = (previous["ts"] < start) | (previous["ts"] >= end)
+            bars = pd.concat([previous.loc[keep], bars], ignore_index=True)
+        bars = bars.sort_values(["ts", "ticker"], ignore_index=True)
+        with TemporaryDirectory(dir=root) as folder:
+            tmp = Path(folder) / path.name
+            bars.to_parquet(tmp, index=False, compression="zstd")
+            tmp.replace(path)
     return path
+
+
+def _daily_raw(root, day, session):
+    """Locate a daily raw file and verify its feed, trading window and point-in-time universe."""
+    tickers = get_universe(day.date())
+    if not tickers:
+        raise ValueError(f"Empty universe for {day.date()}")
+    # The first regular minute ends at 09:31. The exclusive API end includes the close label.
+    request = dict(dataset=DATASET, schema=SCHEMA, stype_in="raw_symbol", symbols=tickers,
+                   start=(session.open + MINUTE).isoformat(), end=(session.close + MINUTE).isoformat())
+    target = root / f"{day.date()}.parquet"
+    legacy = root / "raw" / target.name
+    for path in (target, legacy):
+        if not path.is_file():
+            continue
+        metadata = pq.read_schema(path).metadata or {}
+        if RAW_META not in metadata:  # Some 2018 pilot files at the root are already hourly bars.
+            continue
+        stored = json.loads(metadata[RAW_META])["request"]
+        if (any(stored[field] != request[field] for field in ("dataset", "schema", "stype_in", "symbols"))
+                or any(pd.Timestamp(stored[field]) != pd.Timestamp(request[field]) for field in ("start", "end"))):
+            raise ValueError(f"Raw BBO file does not match this session: {path}")
+        return path, request
+    if target.exists() or legacy.exists():
+        raise ValueError(f"No raw BBO file for {day.date()}; an existing Parquet is not a minute quote cache")
+    return target, request
 
 
 class _SpreadJobs:
@@ -89,9 +119,9 @@ class _SpreadJobs:
         self._batch = client.batch
         self._remote_ids = None
 
-    def download(self, missing, raw_dir):
+    def download(self, missing, root):
         # Submit all missing days before waiting on the first one. The journal survives an interrupted run.
-        with closing(sqlite3.connect(raw_dir.parent / "jobs.sqlite3", timeout=30)) as journal:
+        with closing(sqlite3.connect(root / "jobs.sqlite3", timeout=30)) as journal:
             journal.execute("""CREATE TABLE IF NOT EXISTS jobs (request_key TEXT PRIMARY KEY,
                                request TEXT NOT NULL, job_id TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
             jobs = [(path, request, self._job_for(path, request, journal)) for path, request in missing.items()]
@@ -180,7 +210,7 @@ class _SpreadJobs:
                     store = db.DBNStore.from_bytes(stream)
                     parts.append(store.to_df(price_type="fixed", pretty_ts=False))
             raw = pd.concat(parts).reset_index()  # keep ts_recv, the DBN index
-            info = dict(request=request, job_id=job_id, rows=len(raw), price_scale_usd=1e-9,
+            info = dict(request=request, rows=len(raw), price_scale_usd=1e-9,
                         undef_price=UNDEF_PRICE, version=1, compressed_dbn_bytes=sum(p.stat().st_size for p in dbn_files),
                         timestamps="UTC Unix ns; ts_recv = interval end, ts_event = last trade")
             table = pa.Table.from_pandas(raw, preserve_index=False)
@@ -190,75 +220,26 @@ class _SpreadJobs:
             tmp.replace(path)
 
 
-def _read_session_book(raw_path, day, session):
-    """Read the requested universe and its regular-session BBOs, with prices in dollars per share."""
-    info = json.loads(pq.read_schema(raw_path).metadata[RAW_META])
-    request = info["request"]
-    tickers = get_universe(day.date())
-    same_feed = request["dataset"] == DATASET and request["schema"] == SCHEMA
-    same_open = pd.Timestamp(request["start"]) == session.open + MINUTE
-    same_close = pd.Timestamp(request["end"]) == session.close + MINUTE
-    if request["symbols"] != tickers or not (same_feed and same_open and same_close):
-        raise ValueError(f"Raw BBO file does not match this session: {raw_path}")
-
-    book = pd.read_parquet(raw_path, columns=["ts_recv", "symbol", "bid_px_00", "ask_px_00", *DEPTH])
-    book = book.rename(columns={"symbol": "ticker", "bid_px_00": "bid", "ask_px_00": "ask"})
-    # ts_recv = 10:00 labels [09:59, 10:00), so it matches the 10:00 decision directly.
-    book["source_ts"] = pd.to_datetime(book.pop("ts_recv"), unit="ns", utc=True).dt.tz_convert(NY)
-    in_session = book["source_ts"].between(session.open, session.close, inclusive="right")
-    book = book.loc[in_session].copy()
-    prices = book[["bid", "ask"]]
-    book[["bid", "ask"]] = prices.mask(prices == UNDEF_PRICE).astype(float) / 1e9  # dollars per share
-    book[DEPTH] = book[DEPTH].astype("UInt32")
-    return tickers, book
-
-
-def _hourly_spreads(book, tickers, session):
-    """Match the last same-session snapshot to each decision and compute midpoint, spreads and quote status."""
-    first_hour = session.open.tz_convert(NY).ceil("h")
-    hours = pd.date_range(first_hour, session.close.tz_convert(NY), freq="h", inclusive="left")
-    hours = hours[(hours.hour >= 10) & (hours.hour <= 15)].as_unit("ns")
-    grid = pd.MultiIndex.from_product([hours, tickers], names=["ts", "ticker"]).to_frame(index=False)
-    book["ticker"] = book["ticker"].astype(grid["ticker"].dtype)
-    # An empty minute takes the last snapshot (price and size) for this ticker today, or NaN if none.
-    bars = pd.merge_asof(grid, book.sort_values("source_ts"), left_on="ts", right_on="source_ts",
-                         by="ticker", direction="backward")
-    bars["age_seconds"] = (bars["ts"] - bars["source_ts"]).dt.total_seconds()
-    bars["carried"] = bars["age_seconds"] > 0
-
+def _hourly_spreads(path, session, tickers):
+    """Match the exact BBO at 10:00–15:00 New York (10:00–12:00 on an early close)."""
+    first = session.open.tz_convert(NY).ceil("h")
+    hours = pd.date_range(first, session.close.tz_convert(NY), freq="h", inclusive="left")
+    hours = hours[(hours.hour >= 10) & (hours.hour <= 15)]
+    # A 10:00 ts_recv is the right edge of [09:59, 10:00). A missing minute contributes no row.
+    bars = pd.read_parquet(path, columns=["ts_recv", "symbol", "bid_px_00", "ask_px_00"],
+                           filters=[("ts_recv", "in", [hour.value for hour in hours])])
+    bars = bars.rename(columns={"symbol": "ticker", "bid_px_00": "bid", "ask_px_00": "ask"})
+    bars = bars.loc[bars["ticker"].isin(tickers)].copy()
+    bars["ticker"] = bars["ticker"].astype(object)
+    bars["ts"] = pd.to_datetime(bars.pop("ts_recv"), unit="ns", utc=True).dt.tz_convert(NY)
+    prices = bars[["bid", "ask"]]
+    bars[["bid", "ask"]] = prices.mask(prices == UNDEF_PRICE).astype(float) / 1e9
     bid, ask = bars["bid"], bars["ask"]
-    has_bid, has_ask = bid.gt(0), ask.gt(0)
-    both_sides = has_bid & has_ask
-    bars["mid"] = ((bid + ask) / 2).where(both_sides)
-    bars["spread"] = (ask - bid).round(9).where(both_sides & (ask >= bid))
-    bars["half_spread"] = bars["spread"] / 2  # one-way cost from mid, in dollars per share
-    bars["spread_bps"] = 10_000 * bars["spread"] / bars["mid"]
-    bars["half_spread_bps"] = bars["spread_bps"] / 2
-
-    wide = (100 * bars["spread"] - bars["mid"]).round(10) > 0  # strictly above 100 bps (1% of mid)
-    quality = {
-        "missing": bars["source_ts"].isna(),
-        "no_valid_side": ~has_bid & ~has_ask,
-        "one_sided": has_bid != has_ask,
-        "crossed": ask < bid,
-        "locked": ask == bid,
-        "wide": wide,
-    }
-    bars["status"] = np.select(list(quality.values()), list(quality), default="ok")  # First match wins.
-    return bars
+    valid = bid.gt(0) & ask.gt(0) & ask.ge(bid)
+    bars["half_spread"] = (ask - bid).round(9).where(valid) / 2  # one-way cost, dollars per share
+    return bars[["ts", "ticker", "bid", "ask", "half_spread"]].drop_duplicates(["ts", "ticker"], keep="last")
 
 
 if __name__ == "__main__":
-    monthly_files = []
-    for month in pd.period_range("2025-01", "2025-12", freq="M"):
-        download_spread_data(month.start_time.date(), (month + 1).start_time.date())
-        monthly_files.append(build_hour_bar_spread(str(month)))
-
-    yearly = OUTPUT_DIR / "yearly" / "2025.parquet"
-    yearly.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(dir=yearly.parent) as folder:
-        tmp = Path(folder) / yearly.name
-        rows = pd.concat([pd.read_parquet(path) for path in monthly_files], ignore_index=True)
-        rows.to_parquet(tmp, index=False, compression="zstd")
-        tmp.replace(yearly)
-    print(yearly)
+    download_spread_data()
+    print(build_hour_bar_spread())
