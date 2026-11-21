@@ -1,5 +1,0 @@
-# Keep local journals, old pilot data and temporary outputs out of Git.
-*
-!.gitignore
-!/2025-[0-9][0-9]-[0-9][0-9].parquet
-!/1h_bar.parquet
