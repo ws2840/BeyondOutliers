@@ -6,7 +6,6 @@ import pandas as pd
 
 UNIVERSE_PATH = Path(__file__).resolve().parents[2] / "data" / "universe" / "sp500_universe_early_end.csv"
 
-
 @lru_cache(maxsize=1)
 def _load_membership() -> pd.DataFrame:
     return pd.read_csv(UNIVERSE_PATH, parse_dates=["start_date", "end_date"])
