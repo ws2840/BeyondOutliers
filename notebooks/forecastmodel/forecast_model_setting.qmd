@@ -1,0 +1,36 @@
+---
+title: "Forecast Model: Setting and Data Split"
+subtitle: "BeyondOutliers | Working specification"
+format:
+  pdf:
+    documentclass: article
+    fontsize: 11pt
+    papersize: letter
+    geometry: margin=0.95in
+    toc: false
+    number-sections: false
+    pdf-engine: pdflatex
+---
+
+# 1. Model setting
+
+Each team member develops a prediction model for future residual returns using information available at each decision time. Individual predictions will be combined into an ensemble signal for the portfolio optimizer. The current data pipeline provides hourly equity bars and factor-model outputs; feature selection, model class, and forecast horizon remain to be specified.
+
+# 2. Chronological data split
+
+Data from **2018-05-01 to 2019-05-01** are used to warm up features and the risk model. Forecast-model training starts on **2019-05-01**, and **2025** is reserved for testing.
+
+| Sample | Decision-time interval |
+|:-------|:-----------------------|
+| Warm-up | 2018-05-01 $\le t <$ 2019-05-01 |
+| Train | 2019-05-01 $\le t <$ 2025-01-01 |
+| Test | 2025-01-01 $\le t <$ 2026-01-01 |
+
+Dates use US/Eastern and left-closed, right-open intervals. Warm-up observations are not forecast-model training samples; testing includes available observations through **2025-12-31**.
+
+# 3. Training, evaluation, and signal combination
+
+- **Individual models.** Each team member develops their own prediction model within the shared training period, choosing features, model class, and hyperparameters independently.
+- **Flexible validation.** Each member decides how to split training and validation data: a chronological holdout, walk-forward validation, or another time-aware approach. Model selection and tuning stay within the training period.
+- **Common test evaluation.** Finalize individual models, then evaluate all predictions on the same 2025 test set using agreed metrics. Use a common target, forecast horizon, and evaluation universe; submit predictions indexed by timestamp and ticker on a consistent scale.
+- **Combined signal.** After evaluating individual models, combine their predictions into an ensemble signal for portfolio optimization. The combination rule is to be agreed. Set weights using training-period validation predictions or a preset rule; if 2025 results are used to select models or tune weights, the ensemble needs a new holdout for independent evaluation.
