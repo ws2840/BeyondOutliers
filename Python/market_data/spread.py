@@ -1,209 +1,187 @@
-"""Sample Nasdaq minute BBOs at the portfolio's hourly decisions.
-
-Run `python Python/market_data/spread.py` for May 2018, or supply
-`--start 2018-05-01 --end 2018-05-02` for one day. Dates are New York
-session dates in [start, end). The Databento SDK uses DATABENTO_API_KEY.
-One local parquet file per session contains one row per (ts, ticker).
-Bid, ask, mid, spread and half_spread are USD/share. spread_bps and
-half_spread_bps scale their dollar equivalents by 10,000 / mid.
-"""
-
-import argparse
-import warnings
-from datetime import date, timedelta
+"""Download daily Nasdaq BBOs and sample hourly spreads for a complete trading month."""
+import hashlib
+import json
+import sqlite3
+import time
+from contextlib import closing
+from datetime import timedelta
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import TemporaryDirectory
 
+import databento as db
 import exchange_calendars as xcals
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 if __package__:
     from .universe import get_universe
-else:  # python Python/market_data/spread.py
+else:
     from universe import get_universe
 
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "spread"
-DATASET = "XNAS.ITCH"
-SCHEMA = "bbo-1m"
-TZ = "America/New_York"
+NY = "America/New_York"
 MINUTE = timedelta(minutes=1)
-DEFAULT_START = date(2018, 5, 1)
-DEFAULT_END = date(2018, 6, 1)
+RAW_META = b"beyondoutliers_bbo"
+DEPTH = ["bid_sz_00", "ask_sz_00", "bid_ct_00", "ask_ct_00"]
 
 
-def decision_times(market_open, market_close):
-    """Return exact NY hours from 10:00 to 15:00, strictly before session close."""
-    opened = market_open.tz_convert(TZ)
-    hours = pd.date_range(opened.ceil("h"), market_close.tz_convert(TZ), freq="h", inclusive="left")
-    return hours[(hours.hour >= 10) & (hours.hour <= 15)].as_unit("ns")
-
-
-def spread_snapshot(quotes, tickers, times, market_open):
-    """Match right-labeled BBO records to decisions in one regular session.
-
-    source_ts is the end of the BBO snapshot interval, which can contain
-    a carried-forward book. age_seconds measures snapshot age, not the age
-    of the underlying exchange quote. Preserve both sides of the same row.
-    """
-    grid = pd.MultiIndex.from_product([times, tickers], names=["ts", "ticker"]).to_frame(index=False)
-    if quotes.empty:
-        grid["source_ts"] = pd.Series(pd.NaT, dtype=grid["ts"].dtype, index=grid.index)
-        grid[["bid", "ask"]] = np.nan
-    else:
-        # DBNStore.to_df indexes BBO by ts_recv. ts_event is the LAST TRADE.
-        if "ts_recv" not in quotes.columns:
-            if quotes.index.name != "ts_recv":
-                raise ValueError("bbo-1m needs ts_recv as a column or named index")
-            quotes = quotes.reset_index()
-        book = quotes[["ts_recv", "symbol", "bid_px_00", "ask_px_00"]].rename(columns={
-            "ts_recv": "source_ts", "symbol": "ticker", "bid_px_00": "bid", "ask_px_00": "ask",
-        })
-        book["source_ts"] = book["source_ts"].dt.tz_convert(TZ).astype(grid["ts"].dtype)
-        # A BBO ending at the open describes the preceding pre-market minute.
-        book = book.loc[book["ticker"].isin(tickers) & (book["source_ts"] > market_open)
-                        & (book["source_ts"] <= times[-1])].copy()
-        book["ticker"] = book["ticker"].astype(grid["ticker"].dtype)
-        if book.duplicated(["source_ts", "ticker"]).any():
-            raise ValueError("duplicate BBO records for a ticker and minute")
-        grid = pd.merge_asof(grid, book.sort_values("source_ts"), left_on="ts", right_on="source_ts",
-                             by="ticker", direction="backward", allow_exact_matches=True)
-
-    grid["age_seconds"] = (grid["ts"] - grid["source_ts"]).dt.total_seconds()
-    grid["carried"] = grid["age_seconds"].gt(0)
-    bid, ask = grid["bid"], grid["ask"]
-    # An undefined DBN price is INT64_MAX in units of 1e-9 USD.
-    max_price = np.iinfo(np.int64).max / 1e9
-    good_bid = (bid > 0) & (bid < max_price)
-    good_ask = (ask > 0) & (ask < max_price)
-    valid_prices = good_bid & good_ask
-    grid["mid"] = ((bid + ask) / 2).where(valid_prices)
-    # DBN prices have nine decimal places. Remove subtraction noise before
-    # applying the strict 100-bps threshold (e.g. 9.95 bid / 10.05 ask).
-    grid["spread"] = (ask - bid).round(9).where(valid_prices & (ask >= bid))
-    grid["half_spread"] = grid["spread"] / 2
-    grid["spread_bps"] = 10_000 * grid["spread"] / grid["mid"]
-    grid["half_spread_bps"] = grid["spread_bps"] / 2
-    # spread > 1% of mid. A midpoint can be half a DBN price unit.
-    wide = (100 * grid["spread"] - grid["mid"]).round(10) > 0
-    grid["status"] = np.select(
-        [grid["source_ts"].isna(), ~good_bid & ~good_ask, ~valid_prices,
-         ask < bid, ask == bid, wide],
-        ["missing", "no_valid_side", "one_sided", "crossed", "locked", "wide"], default="ok",
-    )
-    return grid
-
-
-def _check_day(frame, times, tickers):
-    expected = pd.MultiIndex.from_product([times, tickers], names=["ts", "ticker"])
-    actual = pd.MultiIndex.from_frame(frame[["ts", "ticker"]])
-    if not actual.equals(expected) or not {"source_ts", "bid", "ask", "mid", "spread", "half_spread",
-                                           "spread_bps", "half_spread_bps", "status",
-                                           "age_seconds", "carried"}.issubset(frame.columns):
-        raise ValueError("spread file has an unexpected schema or incomplete session grid")
-
-
-def _daily_requests(start_date, end_date):
-    start = pd.Timestamp(date.fromisoformat(str(start_date)))
-    end = pd.Timestamp(date.fromisoformat(str(end_date)))
-    if end <= start:
-        raise ValueError("end_date must be later than start_date (exclusive end)")
-    # Padding supports even a request containing only an exchange holiday.
+def download_spread_data(start_date="2025-01-01", end_date="2025-02-01", *, output_dir=OUTPUT_DIR, client=None):
+    """Cache all regular-session minute BBOs for each day's universe. End date is exclusive."""
+    start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
+    if start >= end:
+        raise ValueError("end_date is exclusive and must follow start_date")
     calendar = xcals.get_calendar("XNYS", start=start - timedelta(days=7), end=end + timedelta(days=7))
     sessions = calendar.schedule.loc[start:end - timedelta(days=1)]
-    for session, schedule in sessions.iterrows():
-        day = session.date()
-        times = decision_times(schedule["open"], schedule["close"])
-        tickers = get_universe(day)
-        if not tickers:
-            raise ValueError(f"empty project universe for {day}")
-        request = dict(dataset=DATASET, schema=SCHEMA, symbols=tickers, stype_in="raw_symbol",
-                       start=schedule["open"] + MINUTE, end=times[-1] + MINUTE)
-        yield day, schedule["open"], times, request
-
-
-def _historical_client():
-    import databento as db
-    return db.Historical()
-
-
-def spread_size(start_date=DEFAULT_START, end_date=DEFAULT_END):
-    """Offline upper bounds assuming one 80-byte BBO record per stock per requested minute."""
-    rows = []
-    for day, _, times, request in _daily_requests(start_date, end_date):
-        stocks = len(request["symbols"])
-        minutes = (request["end"] - request["start"]) // MINUTE
-        maximum = stocks * minutes
-        rows.append({"date": day, "stocks": stocks, "decisions": len(times), "stock_decisions": stocks * len(times),
-                     "minutes": minutes, "max_records": maximum, "max_record_bytes": 80 * maximum})
-    return pd.DataFrame(rows, columns=["date", "stocks", "decisions", "stock_decisions", "minutes",
-                                        "max_records", "max_record_bytes"])
-
-
-def estimate_spreads(start_date=DEFAULT_START, end_date=DEFAULT_END, *, client=None):
-    """Query Databento metadata for the same per-day requests; prices are in USD."""
-    estimates = []
-    for day, _, _, request in _daily_requests(start_date, end_date):
-        if client is None:
-            client = _historical_client()
-        meta = client.metadata
-        estimates.append({"date": day, "records": meta.get_record_count(**request),
-                          "billable_bytes": meta.get_billable_size(**request), "cost_usd": meta.get_cost(**request)})
-    return pd.DataFrame(estimates, columns=["date", "records", "billable_bytes", "cost_usd"])
-
-
-def build_spreads(start_date=DEFAULT_START, end_date=DEFAULT_END, *, output_dir=OUTPUT_DIR, client=None):
-    """Write and return daily file paths for the half-open range [start_date, end_date)."""
-    paths = []
-    output_dir = Path(output_dir)
-    for day, opened, times, request in _daily_requests(start_date, end_date):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        tickers = request["symbols"]
-        path = output_dir / f"{day}.parquet"
-        if path.exists():
-            try:
-                _check_day(pd.read_parquet(path), times, tickers)
-            except (ValueError, KeyError) as exc:
-                warnings.warn(f"rebuilding invalid day file {path}: {exc}")
-            else:
-                paths.append(path)
-                print(f"{day}: cached {len(tickers) * len(times):,} rows, {path.stat().st_size:,} bytes, {path}")
-                continue
-
-        if client is None:
-            client = _historical_client()
-        raw = client.timeseries.get_range(**request)
-        quotes = raw.to_df(price_type="float", pretty_ts=True, map_symbols=True)
-        frame = spread_snapshot(quotes, tickers, times, opened)
-        with NamedTemporaryFile(dir=output_dir, prefix=f".{day}-", suffix=".tmp", delete=False) as f:
-            temp = Path(f.name)
-        try:
-            frame.to_parquet(temp, index=False, compression="zstd")
-            _check_day(pd.read_parquet(temp), times, tickers)
-            temp.replace(path)
-        finally:
-            temp.unlink(missing_ok=True)
-        print(f"{day}: wrote {len(frame):,} rows, {path.stat().st_size:,} bytes, {path}")
+    raw_dir = Path(output_dir) / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    paths, missing = [], []
+    for day, session in sessions.iterrows():
+        path = raw_dir / f"{day.date()}.parquet"
         paths.append(path)
+        if path.exists():
+            continue
+        # Minute labels mark the interval end, so include the close.
+        request = dict(dataset="XNAS.ITCH", schema="bbo-1m", stype_in="raw_symbol",
+                       symbols=get_universe(day.date()), start=(session.open + MINUTE).isoformat(),
+                       end=(session.close + MINUTE).isoformat())
+        if not request["symbols"]:
+            raise ValueError(f"Empty universe for {day.date()}")
+        missing.append((path, request))
+    if not missing:
+        return paths
+
+    batch = (client if client is not None else db.Historical()).batch
+    downloads = []
+    remote_ids = None
+    with closing(sqlite3.connect(raw_dir.parent / "jobs.sqlite3", timeout=30)) as journal:
+        journal.execute("""CREATE TABLE IF NOT EXISTS jobs (request_key TEXT PRIMARY KEY,
+                           request TEXT NOT NULL, job_id TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        for path, request in missing:
+            encoded = json.dumps(request, sort_keys=True)
+            key = hashlib.sha256(encoded.encode()).hexdigest()
+            local = journal.execute("SELECT job_id FROM jobs WHERE request_key=?", (key,)).fetchone()
+            if local and local[0]:
+                downloads.append((path, request, local[0]))
+                continue
+            # Also reuse orders submitted on another machine. The list API returns only summaries.
+            if remote_ids is None:
+                remote_ids = {}
+                for entry in batch.list_jobs(states=["queued", "processing", "done", "expired"]):
+                    job = batch.get_job_details(entry["id"])
+                    if (job["dataset"], job["schema"], job["encoding"], job["compression"]) != ("XNAS.ITCH", "bbo-1m", "dbn", "zstd"):
+                        continue
+                    if job["stype_out"] != "instrument_id" or job.get("limit") or job.get("delivery", "download") != "download":
+                        continue
+                    fields = {field: job[field] for field in request}
+                    names = fields["symbols"].split(",") if isinstance(fields["symbols"], str) else fields["symbols"]
+                    fields.update(symbols=sorted(names), start=pd.Timestamp(job["start"]).isoformat(),
+                                  end=pd.Timestamp(job["end"]).isoformat())
+                    identity = json.dumps(fields, sort_keys=True)
+                    if job["state"] != "expired" or identity not in remote_ids:
+                        remote_ids[identity] = job["id"]
+
+            # Commit the claim before the paid POST, including when two processes run together.
+            job_id = remote_ids.get(encoded)
+            with journal:
+                new = journal.execute("INSERT OR IGNORE INTO jobs(request_key,request,job_id) VALUES (?,?,?)",
+                                      (key, encoded, job_id)).rowcount
+            if not job_id and not new:
+                raise RuntimeError(f"Unconfirmed batch for {path.stem}. Check Download Center, then rerun.")
+            if not job_id:
+                try:
+                    job_id = batch.submit_job(**request, encoding="dbn", compression="zstd", split_duration="none")["id"]
+                except Exception as error:
+                    if getattr(error, "http_status", None) in {400, 401, 402, 403, 413, 422, 429}:
+                        with journal:
+                            journal.execute("DELETE FROM jobs WHERE request_key=? AND job_id IS NULL", (key,))
+                    raise
+            with journal:
+                journal.execute("UPDATE jobs SET job_id=? WHERE request_key=?", (job_id, key))
+            downloads.append((path, request, job_id))
+
+    for path, request, job_id in downloads:
+        for attempt in range(3):  # Only poll and download again. The paid job already exists.
+            try:
+                state = batch.get_job_details(job_id)["state"]
+                while state in {"queued", "processing"}:
+                    time.sleep(5)
+                    state = batch.get_job_details(job_id)["state"]
+                if state != "done":
+                    raise RuntimeError(f"Batch {job_id} is {state}")
+                with TemporaryDirectory(dir=raw_dir) as folder:
+                    files = batch.download(job_id=job_id, output_dir=folder)
+                    dbns = [p for p in files if p.name.endswith(".dbn.zst")]
+                    parts = []
+                    for dbn_file in dbns:  # An existing job may have split its output.
+                        with dbn_file.open("rb") as stream:
+                            parts.append(db.DBNStore.from_bytes(stream).to_df(price_type="fixed", pretty_ts=False))
+                    raw = pd.concat(parts).reset_index()
+                    info = dict(request=request, job_id=job_id, rows=len(raw), price_scale_usd=1e-9, undef_price=2**63-1,
+                                version=1, compressed_dbn_bytes=sum(p.stat().st_size for p in dbns),
+                                timestamps="UTC Unix ns; ts_recv = interval end, ts_event = last trade")
+                    table = pa.Table.from_pandas(raw, preserve_index=False)
+                    table = table.replace_schema_metadata({**table.schema.metadata, RAW_META: json.dumps(info).encode()})
+                    tmp = Path(folder) / "raw.parquet"
+                    pq.write_table(table, tmp, compression="zstd")
+                    tmp.replace(path)
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
     return paths
 
 
+def build_hour_bar_spread(month="2025-01", *, output_dir=OUTPUT_DIR):
+    """Sample the last same-session BBO at each decision and write monthly/YYYY-MM.parquet."""
+    period = pd.Period(month, freq="M")
+    calendar = xcals.get_calendar("XNYS", start=period.start_time, end=period.end_time.normalize())
+    frames = []
+    for day, session in calendar.schedule.iterrows():
+        path = Path(output_dir) / "raw" / f"{day.date()}.parquet"
+        info = json.loads(pq.read_schema(path).metadata[RAW_META])
+        tickers = get_universe(day.date())
+        request = info["request"]
+        if (request["symbols"] != tickers or request["dataset"] != "XNAS.ITCH" or request["schema"] != "bbo-1m"
+                or pd.Timestamp(request["start"]) != session.open + MINUTE or pd.Timestamp(request["end"]) != session.close + MINUTE):
+            raise ValueError(f"Raw BBO file does not match this session: {path}")
+        book = pd.read_parquet(path, columns=["ts_recv", "symbol", "bid_px_00", "ask_px_00", *DEPTH])
+        book = book.rename(columns={"symbol": "ticker", "bid_px_00": "bid", "ask_px_00": "ask"})
+        book["source_ts"] = pd.to_datetime(book.pop("ts_recv"), utc=True, unit="ns").dt.tz_convert(NY)
+        book = book.loc[book["source_ts"].between(session.open, session.close, inclusive="right")].copy()
+        prices = book[["bid", "ask"]]
+        book[["bid", "ask"]] = prices.mask(prices == 2**63-1).astype(float) / 1e9
+        book[DEPTH] = book[DEPTH].astype("UInt32")
+        hours = pd.date_range(session.open.tz_convert(NY).ceil("h"), session.close.tz_convert(NY), freq="h", inclusive="left")
+        hours = hours[(hours.hour >= 10) & (hours.hour <= 15)].as_unit("ns")
+        grid = pd.MultiIndex.from_product([hours, tickers], names=["ts", "ticker"]).to_frame(index=False)
+        book["ticker"] = book["ticker"].astype(grid["ticker"].dtype)
+        rows = pd.merge_asof(grid, book.sort_values("source_ts"), left_on="ts", right_on="source_ts",
+                             by="ticker", direction="backward")
+        rows["age_seconds"] = (rows["ts"] - rows["source_ts"]).dt.total_seconds()
+        rows["carried"] = rows["age_seconds"] > 0
+        bid, ask = rows["bid"], rows["ask"]
+        both = (bid > 0) & (ask > 0)
+        rows["mid"] = ((bid + ask) / 2).where(both)
+        rows["spread"] = (ask - bid).round(9).where(both & (ask >= bid))
+        rows["half_spread"] = rows["spread"] / 2
+        rows["spread_bps"] = 10_000 * rows["spread"] / rows["mid"]
+        rows["half_spread_bps"] = rows["spread_bps"] / 2
+        wide = (100 * rows["spread"] - rows["mid"]).round(10) > 0  # strictly above 100 bps
+        rows["status"] = np.select([rows["source_ts"].isna(), ~(bid.gt(0) | ask.gt(0)), ~both, ask < bid, ask == bid, wide],
+                                   ["missing", "no_valid_side", "one_sided", "crossed", "locked", "wide"], default="ok")
+        frames.append(rows)
+    path = Path(output_dir) / "monthly" / f"{period}.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=path.parent) as folder:
+        tmp = Path(folder) / "hourly.parquet"
+        pd.concat(frames, ignore_index=True).to_parquet(tmp, index=False, compression="zstd")
+        tmp.replace(path)
+    return path
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--start", type=date.fromisoformat, default=DEFAULT_START, help="first session date (inclusive)")
-    parser.add_argument("--end", type=date.fromisoformat, default=DEFAULT_END, help="exclusive end date")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--size-only", action="store_true", help="offline upper bounds; no API key or network needed")
-    mode.add_argument("--estimate", action="store_true", help="query Databento metadata without downloading quotes")
-    args = parser.parse_args()
-    if args.size_only:
-        sizes = spread_size(args.start, args.end)
-        print("Offline upper bound: up to one 80-byte uncompressed DBN record per stock per requested minute.")
-        print(sizes.to_string(index=False))
-        print("Total:", sizes[["stock_decisions", "max_records", "max_record_bytes"]].sum().to_dict())
-    elif args.estimate:
-        estimates = estimate_spreads(args.start, args.end)
-        print(estimates.to_string(index=False))
-        print("Total:", estimates[["records", "billable_bytes", "cost_usd"]].sum().to_dict())
-    else:
-        build_spreads(args.start, args.end)
+    download_spread_data()
+    print(build_hour_bar_spread())

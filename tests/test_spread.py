@@ -1,7 +1,6 @@
-"""Offline regression checks for Nasdaq decision-time spreads."""
-
+"""Offline tests for full-session downloads and decision-hour snapshots."""
 import unittest
-from datetime import date
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -14,133 +13,100 @@ import pandas as pd
 from Python.market_data import spread
 
 
-def ny(time):
-    return pd.Timestamp("2018-05-01 " + time, tz="America/New_York")
+def synthetic_dbn(day, quotes):
+    """Make real BBO-1m DBN bytes, with a deliberately old last-trade timestamp."""
+    def stamp(time):
+        return pd.Timestamp(f"{day} {time}", tz="America/New_York").value
 
-
-def sdk_quotes():
-    # The second record arrives after the decision despite an old last-trade stamp.
-    trade_time = ny("09:45").value
-    records = [
-        dbn.BBOMsg(
-            rtype=dbn.RType.BBO_1M, publisher_id=2, instrument_id=7,
-            ts_event=trade_time, ts_recv=ny(minute).value, price=50_000_000_000,
-            size=10, side=dbn.Side.NONE, levels=dbn.BidAskPair(bid, ask),
-        )
-        for minute, bid, ask in [
-            ("10:00", 49_000_000_000, 51_000_000_000),
-            ("10:01", 50_000_000_000, 50_500_000_000),
-        ]
-    ]
-    mapping = SimpleNamespace(
-        start_date=date(2018, 5, 1), end_date=date(2018, 5, 2), symbol="7",
-    )
+    symbols = ["AAPL", "MSFT"]
+    mappings = []
+    records = []
+    for number, symbol in enumerate(symbols, start=1):
+        interval = SimpleNamespace(start_date=day, end_date=day + timedelta(days=1), symbol=str(number))
+        mappings.append(SimpleNamespace(raw_symbol=symbol, intervals=[interval]))
+    for time, symbol, bid, ask in quotes:
+        records.append(dbn.BBOMsg(
+            rtype=dbn.RType.BBO_1M, publisher_id=2, instrument_id=symbols.index(symbol) + 1,
+            ts_recv=stamp(time), ts_event=stamp("09:31"), price=50_000_000_000,
+            size=10, side=dbn.Side.NONE, levels=dbn.BidAskPair(bid, ask, 123, 456, 2, 3),
+        ))
     metadata = dbn.Metadata(
-        dataset="XNAS.ITCH", start=trade_time, schema=dbn.Schema.BBO_1M,
-        stype_in=dbn.SType.RAW_SYMBOL, stype_out=dbn.SType.INSTRUMENT_ID,
-        symbols=["AAPL"], mappings=[SimpleNamespace(raw_symbol="AAPL", intervals=[mapping])],
+        dataset="XNAS.ITCH", schema=dbn.Schema.BBO_1M, start=stamp("09:31"),
+        stype_in=dbn.SType.RAW_SYMBOL, stype_out=dbn.SType.INSTRUMENT_ID, mappings=mappings,
     )
     return db.DBNStore.from_bytes(metadata.encode() + b"".join(map(bytes, records)))
 
 
 class SpreadTests(unittest.TestCase):
-    def test_minute_bbo_matches_last_tick_before_each_interval_end(self):
-        # Synthetic AAPL book updates in exchange receive order. Each tuple is a whole BBO.
-        ticks = [
-            (ny("09:59:00"), 48, 51),
-            (ny("09:59:59.999999999"), 49, 51),
-            (ny("10:00:00"), 50, 51),
-            (ny("10:00:59.999999999"), 50, 50.5),
-            (ny("10:01:00"), 51, 52),
+    def test_closed_sessions_never_order_data(self):
+        for day, next_day in [("2018-05-28", "2018-05-29"), ("2025-01-09", "2025-01-10")]:
+            with self.subTest(day=day), TemporaryDirectory() as folder:
+                result = spread.download_spread_data(day, next_day, output_dir=folder, client=object())
+                self.assertEqual(result, [])
+
+    def test_download_cache_and_hourly_book(self):
+        # Two adjacent sessions include a normal close and the July 3 early close.
+        schedule = spread.xcals.get_calendar("XNYS").schedule.loc["2018-07-02":"2018-07-03"]
+        fixture_quotes = [
+            [("10:00", "AAPL", 49_000_000_000, 51_000_000_000),
+             ("10:00", "MSFT", 20_000_000_000, 20_000_000_000),
+             ("10:01", "AAPL", 50_000_000_000, 50_500_000_000)],
+            [("10:00", "AAPL", 51_000_000_000, dbn.UNDEF_PRICE),
+             ("11:00", "AAPL", 52_000_000_000, 51_000_000_000)],
         ]
-        ends = pd.DatetimeIndex([ny("10:00"), ny("10:01")])
-        observed = spread.spread_snapshot(sdk_quotes().to_df(), ["AAPL"], ends, ny("09:30"))
-        for row in observed.itertuples(index=False):
-            start = row.ts - pd.offsets.Minute()
-            last = next(tick for tick in reversed(ticks) if start <= tick[0] < row.ts)
-            with self.subTest(interval_end=row.ts):
-                self.assertEqual((row.bid, row.ask), last[1:])
-                self.assertEqual(row.spread, last[2] - last[1])
+        with (
+            TemporaryDirectory() as folder,
+            patch.object(spread, "get_universe", return_value=["AAPL", "MSFT"]),
+            patch.object(spread.xcals, "get_calendar", return_value=SimpleNamespace(schedule=schedule)),
+        ):
+            root = Path(folder)
+            stores = {}
+            files = {}
+            for stamp, rows in zip(schedule.index, fixture_quotes):
+                job = str(stamp.date())
+                stores[job] = synthetic_dbn(stamp.date(), rows)
+                files[job] = root / f"{job}.dbn.zst"
+                stores[job].to_file(files[job], compression="zstd")
 
-    def test_sdk_bbo_uses_interval_end_and_ignores_future_update(self):
-        times = pd.DatetimeIndex([ny("10:00"), ny("11:00")])
-        quotes = sdk_quotes().to_df()
-        self.assertEqual(quotes.index.name, "ts_recv")
-        result = spread.spread_snapshot(quotes, ["AAPL"], times, ny("09:30"))
-        first, second = result.itertuples(index=False)
-        self.assertEqual((first.bid, first.ask, first.source_ts), (49, 51, ny("10:00")))
-        self.assertEqual((first.mid, first.spread, first.half_spread), (50, 2, 1))
-        self.assertEqual((first.spread_bps, first.half_spread_bps), (400, 200))
-        self.assertEqual((first.age_seconds, first.carried), (0, False))
-        self.assertEqual((second.bid, second.ask, second.source_ts), (50, 50.5, ny("10:01")))
-        self.assertEqual((second.age_seconds, second.carried), (59 * 60, True))
+            batch = Mock()
+            batch.list_jobs.return_value = []
+            batch.submit_job.side_effect = lambda **query: {"id": str(pd.Timestamp(query["start"]).date())}
+            batch.get_job_details.return_value = {"state": "done"}
+            batch.download.side_effect = lambda job_id, **kwargs: [files[job_id]]
 
-    def test_snapshot_never_reuses_another_symbol_or_preopen_book(self):
-        quotes = pd.DataFrame([
-            (ny("09:59"), "A", 99, 100),
-            (ny("16:00") - pd.Timedelta(days=1), "B", 19, 20),
-            (ny("09:30"), "B", 29, 30),
-            (ny("10:01"), "B", 39, 40),
-        ], columns=["ts_recv", "symbol", "bid_px_00", "ask_px_00"])
-        times = pd.DatetimeIndex([ny("10:00")])
-        result = spread.spread_snapshot(quotes, ["A", "B"], times, ny("09:30")).set_index("ticker")
-        self.assertEqual(result.loc["A", "age_seconds"], 60)
-        self.assertEqual(result.loc["B", "status"], "missing")
-        self.assertTrue(pd.isna(result.loc["B", "source_ts"]))
-        self.assertTrue(pd.isna(result.loc["B", "spread"]))
+            client = SimpleNamespace(batch=batch)
+            days = spread.download_spread_data("2018-07-01", "2018-08-01", output_dir=root, client=client)
+            self.assertEqual(batch.submit_job.call_count, 2)
+            for path in days:
+                raw = pd.read_parquet(path)
+                expected = stores[path.stem].to_df(price_type="fixed", pretty_ts=False).reset_index()
+                pd.testing.assert_frame_equal(raw[expected.columns], expected, check_dtype=False)
+            cached = spread.download_spread_data("2018-07-01", "2018-08-01", output_dir=root, client=object())
+            self.assertEqual(days, cached)
 
-    def test_quality_flags_and_costs(self):
-        sides = {"ONE": (9, None), "EMPTY": (0, 0), "LOCK": (10, 10),
-                 "CROSS": (11, 10), "WIDE": (9, 11)}
-        quotes = pd.DataFrame([(ny("10:00"), symbol, *s) for symbol, s in sides.items()],
-                              columns=["ts_recv", "symbol", "bid_px_00", "ask_px_00"])
-        times = pd.DatetimeIndex([ny("10:00")])
-        result = spread.spread_snapshot(quotes, list(sides), times, ny("09:30")).set_index("ticker")
-        self.assertEqual(result["status"].to_dict(), {
-            "ONE": "one_sided", "EMPTY": "no_valid_side", "LOCK": "locked",
-            "CROSS": "crossed", "WIDE": "wide",
-        })
-        self.assertTrue(result.loc[["ONE", "EMPTY", "CROSS"],
-                                   ["spread", "half_spread", "spread_bps", "half_spread_bps"]].isna().all().all())
-        self.assertEqual(result.loc["LOCK", "spread_bps"], 0)
-        self.assertEqual(result.loc["WIDE", "spread_bps"], 2000)
+            days[0].unlink()
+            spread.download_spread_data("2018-07-01", "2018-08-01", output_dir=root, client=client)
+            self.assertTrue(days[0].exists())
+            self.assertEqual(batch.submit_job.call_count, 2)
 
-    def test_holiday_half_day_and_rerun(self):
-        client = Mock()
-        client.timeseries.get_range.return_value.to_df.return_value = pd.DataFrame()
-        with TemporaryDirectory() as folder, patch.object(spread, "get_universe", return_value=["AAPL"]):
-            def build(start, end):
-                return spread.build_spreads(start, end, output_dir=Path(folder), client=client)
+            orders = {}
+            for call, raw_path in zip(batch.submit_job.call_args_list, days):
+                orders[raw_path.stem] = dict(call.kwargs, id=raw_path.stem, state="done", stype_out="instrument_id")
+            batch.list_jobs.return_value = [{"id": job_id} for job_id in orders]
+            batch.get_job_details.side_effect = orders.__getitem__
+            other_machine = spread.download_spread_data("2018-07-01", "2018-08-01", output_dir=root / "new", client=client)
+            self.assertEqual([f.name for f in other_machine], [f.name for f in days])
+            self.assertEqual(batch.submit_job.call_count, 2)
+            month = pd.read_parquet(spread.build_hour_bar_spread("2018-07", output_dir=root))
 
-            self.assertEqual(build("2018-05-28", "2018-05-29"), [])
-            client.timeseries.get_range.assert_not_called()
-            paths = build("2018-07-03", "2018-07-04")
-            self.assertEqual(len(paths), 1)
-            saved = pd.read_parquet(paths[0])
-            self.assertEqual(saved["ts"].dt.strftime("%H:%M").tolist(), ["10:00", "11:00", "12:00"])
-            self.assertEqual(saved["status"].tolist(), ["missing"] * 3)
-            self.assertEqual(build("2018-07-03", "2018-07-04"), paths)
-            client.timeseries.get_range.assert_called_once()
-
-    def test_size_and_metadata_use_the_download_window(self):
-        symbols = ["AAPL", "MSFT"]
-        dates = ("2018-05-01", "2018-05-02")
-        metadata = Mock()
-        metadata.get_record_count.return_value = 600
-        metadata.get_billable_size.return_value = 48_000
-        metadata.get_cost.return_value = 0.001
-        download = Mock()
-        download.timeseries.get_range.return_value = sdk_quotes()
-        with TemporaryDirectory() as folder, patch.object(spread, "get_universe", return_value=symbols), \
-                patch.object(spread, "_historical_client", side_effect=AssertionError("offline")):
-            size = spread.spread_size(*dates).iloc[0]
-            estimate = spread.estimate_spreads(*dates, client=SimpleNamespace(metadata=metadata)).iloc[0]
-            spread.build_spreads(*dates, output_dir=Path(folder), client=download)
-        query = download.timeseries.get_range.call_args.kwargs
-        self.assertEqual((query["dataset"], query["schema"], query["symbols"]), ("XNAS.ITCH", "bbo-1m", symbols))
-        self.assertEqual((query["start"], query["end"]), (ny("09:31"), ny("15:01")))
-        self.assertEqual((size.minutes, size.stocks, size.stock_decisions, size.max_record_bytes),
-                         (330, 2, 12, 330 * 2 * 80))
-        for method in (metadata.get_record_count, metadata.get_billable_size, metadata.get_cost):
-            method.assert_called_once_with(**query)
-        self.assertEqual((estimate.records, estimate.billable_bytes, estimate.cost_usd), (600, 48_000, 0.001))
+        self.assertEqual(month.groupby(month.ts.dt.day).size().to_dict(), {2: 12, 3: 6})
+        aapl = month.loc[month.ticker.eq("AAPL")].reset_index(drop=True)
+        first = aapl.iloc[0]
+        self.assertEqual((first.bid, first.ask, first.spread, first.status), (49, 51, 2, "wide"))
+        self.assertEqual((first.bid_sz_00, first.ask_sz_00, first.bid_ct_00, first.ask_ct_00), (123, 456, 2, 3))
+        later = aapl.iloc[1]
+        self.assertEqual((later.bid, later.ask, later.age_seconds), (50, 50.5, 59 * 60))
+        self.assertEqual(aapl.iloc[6:].status.tolist(), ["one_sided", "crossed", "crossed"])
+        msft = month.loc[month.ticker.eq("MSFT")]
+        self.assertTrue(msft.loc[msft.ts.dt.day.eq(2), "status"].eq("locked").all())
+        self.assertTrue(msft.loc[msft.ts.dt.day.eq(3), "source_ts"].isna().all())
