@@ -22,13 +22,12 @@ class ForecastModel(ABC):
     @abstractmethod
     def _forecast(self, for_date):
         """Forecasts of `for_date`'s hourly bars, using only data before `for_date`'s open.
-        Returns a DataFrame indexed by bar ts (as in data/returns/1h_bar.parquet)
-        with columns ticker, forecast."""
+        Returns a DataFrame indexed by time with columns symbol, forecast."""
 
     def gen(self):
         forecasts = []
         for for_date in self._trading_days:
-            forecasts.append(self._forecast(for_date)[["ticker", "forecast"]])
+            forecasts.append(self._forecast(for_date)[["symbol", "forecast"]])
             print('done', for_date)
         forecast_out_dir = FORECAST_OUT_DIR / self._model_name
         forecast_out_dir.mkdir(parents=True, exist_ok=True)

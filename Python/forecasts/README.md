@@ -25,6 +25,6 @@ Build the features the model needs and save them to `data/forecasts/<model_name>
 ## 3. Implement `<model_name>_forecast_gen.py`
 
 Subclass `ForecastModel`, pass `model_name` to `__init__`, and implement `_forecast(for_date)`.
-It returns a DataFrame indexed by bar `ts` (as in `data/returns/1h_bar.parquet`) with columns `ticker, forecast`,
+It returns a DataFrame indexed by time `time` with columns `ticker, forecast`,
 using only data before `for_date`'s open. `gen()` runs every trading day in `[start, end]` and saves
 `data/forecasts/<model_name>/forecast.parquet`.
