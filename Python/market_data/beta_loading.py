@@ -153,7 +153,7 @@ class BetaLoadingGenerator:
 def main():
     # 1 month only for now (2018-05-31); full history is 2018-05-01 to 2025-12-31
     # beta_loading_generator = BetaLoadingGenerator("2018-05-01", "2018-06-01")
-    beta_loading_generator = BetaLoadingGenerator("2018-05-01", "2026-06-01")
+    beta_loading_generator = BetaLoadingGenerator("2018-04-01", "2026-01-01")
     beta_loading_generator.generate()
 
 
