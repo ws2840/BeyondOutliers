@@ -19,14 +19,14 @@ We will build and backtest an end-to-end US equity portfolio, covering market da
 - Market Data: Yahoo finance/WRDS Security Master data and Databento intraday data
 - Risk Model Construction
 - Alpha Model Construction: 2-6 alpha models with a 1-day forecast horizon, evaluated with forecast analytics (IC, t-stats, tail statistics)
-- Spread Cost Model: For 2025, we measured the one-way cost in dollars per share as half the Nasdaq bid-ask spread for the minute ending exactly at each decision hour.
+- Spread Cost Model: one-way cost in dollars per share half the Nasdaq bid-ask spread for minute ending at each decision hour.
 - Portfolio Construction: trading 10:00 am - 3:00 pm EST, aiming to trade every 1h
 - Accountant: PNL/Sharpe and position
 
 ## Data Requirements
 
 - DataBento: 1h bar data from XNAS.ITCH, starting from 2018-05-01 (earliest)
-- We saved the raw Nasdaq one-minute best bid and offer (BBO) data by trading day and combined the 2025 decision-hour quotes into one hourly spread table.
+- Raw Nasdaq one-minute BBO data by trading day one hourly spread table.
 - Yahoo Finance: security master data after 2026-06-30
 - WRDS CRSP: security master data before 2026-06-30
 - WRDS Global factor model: 153 factors
