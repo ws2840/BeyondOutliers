@@ -94,7 +94,7 @@ class ReturnResidualizer:
         if self._lagging:
             out_dir = DATA_DIR / "factor_returns"
         else:
-            out_dir = DATA_DIR / "lagging_returns"
+            out_dir = DATA_DIR / "lead_factor_returns"
         out_dir.mkdir(parents=True, exist_ok=True)
         out.to_parquet(out_dir / f"{eom}.parquet")
         return out
