@@ -27,12 +27,6 @@ S&P 500 constituents are sourced from [`sp500.csv`](https://github.com/fja05680/
 
 ## Nasdaq spread data
 
-From the repository root, use the Python 3.12 environment above to run the offline tests. They do not require an API key.
-
-```sh
-python -m unittest discover -s tests -p test_spread.py
-```
-
 To download missing data, set `DATABENTO_API_KEY` to your own Databento key in your environment. Run `python Python/market_data/spread.py` from the repository root to process January through December 2025. It writes one hourly table per month and combines all twelve into `data/spread/yearly/2025.parquet`. To run a single month, call the two functions directly.
 
 ```python
