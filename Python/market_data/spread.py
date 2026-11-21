@@ -1,7 +1,6 @@
 """Download daily Nasdaq BBOs and sample spreads at exact decision hours."""
 import hashlib
 import json
-import shutil
 import sqlite3
 import time
 from contextlib import closing
@@ -30,7 +29,7 @@ RAW_META = b"beyondoutliers_bbo"
 
 
 def download_spread_data(start_date="2025-01-01", end_date="2026-01-01", *, output_dir=OUTPUT_DIR, client=None) -> list[Path]:
-    """Cache each session's minute BBOs in YYYY-MM-DD.parquet for [start_date, end_date)."""
+    """Cache the raw BBO ending at each decision hour for the sessions in [start_date, end_date)."""
     start, end = pd.Timestamp(start_date), pd.Timestamp(end_date)
     if start >= end:
         raise ValueError("end_date is exclusive and must follow start_date")
@@ -39,16 +38,17 @@ def download_spread_data(start_date="2025-01-01", end_date="2026-01-01", *, outp
     root.mkdir(parents=True, exist_ok=True)
     paths, missing = [], {}
     for day, session in calendar.schedule.loc[start:end - timedelta(days=1)].iterrows():
-        path, request = _daily_raw(root, day, session)
-        target = root / path.name
-        if path != target and not target.exists():  # Promote an older raw/ cache without placing a new order.
-            with TemporaryDirectory(dir=root) as folder:
-                tmp = Path(folder) / path.name
-                shutil.copyfile(path, tmp)
-                tmp.replace(target)
-            path = target
-        if not path.exists():
+        path, request, info = _daily_raw(root, day, session)
+        if info is None:
             missing[path] = request
+        else:
+            target = root / path.name
+            if path != target and target.exists():  # Preserve an older hourly pilot file at the root.
+                target = path
+            current = info.get("version") == 2 and info.get("selection") == "exact_decision_minutes"
+            if path != target or not current or "job_id" in info:
+                _write_decision_raw(target, pq.read_table(path), request, info.get("compressed_dbn_bytes"))
+            path = target
         paths.append(path)
     if missing:
         if client is None:
@@ -65,8 +65,8 @@ def build_hour_bar_spread(year=2025, *, month=None, output_dir=OUTPUT_DIR) -> Pa
     root = Path(output_dir)
     daily = []
     for day, session in calendar.schedule.iterrows():
-        raw, request = _daily_raw(root, day, session)
-        daily.append(_hourly_spreads(raw, session, request["symbols"]))
+        raw, request, _ = _daily_raw(root, day, session)
+        daily.append(_hourly_spreads(raw, request))
     bars = pd.concat(daily, ignore_index=True)
 
     path = root / "1h_bar.parquet"
@@ -102,14 +102,15 @@ def _daily_raw(root, day, session):
         metadata = pq.read_schema(path).metadata or {}
         if RAW_META not in metadata:  # Some 2018 pilot files at the root are already hourly bars.
             continue
-        stored = json.loads(metadata[RAW_META])["request"]
+        info = json.loads(metadata[RAW_META])
+        stored = info["request"]
         if (any(stored[field] != request[field] for field in ("dataset", "schema", "stype_in", "symbols"))
                 or any(pd.Timestamp(stored[field]) != pd.Timestamp(request[field]) for field in ("start", "end"))):
             raise ValueError(f"Raw BBO file does not match this session: {path}")
-        return path, request
+        return path, request, info
     if target.exists() or legacy.exists():
         raise ValueError(f"No raw BBO file for {day.date()}; an existing Parquet is not a minute quote cache")
-    return target, request
+    return target, request, None
 
 
 class _SpreadJobs:
@@ -194,7 +195,7 @@ class _SpreadJobs:
         return remote_ids
 
     def _save_day(self, path, request, job_id):
-        """Wait for one ID and save its original DBN fields and request metadata as a daily Parquet."""
+        """Retrieve the paid full-session request and save just the original decision-minute records."""
         state = self._batch.get_job_details(job_id)["state"]
         while state in {"queued", "processing"}:
             time.sleep(5)
@@ -210,26 +211,46 @@ class _SpreadJobs:
                     store = db.DBNStore.from_bytes(stream)
                     parts.append(store.to_df(price_type="fixed", pretty_ts=False))
             raw = pd.concat(parts).reset_index()  # keep ts_recv, the DBN index
-            info = dict(request=request, rows=len(raw), price_scale_usd=1e-9,
-                        undef_price=UNDEF_PRICE, version=1, compressed_dbn_bytes=sum(p.stat().st_size for p in dbn_files),
-                        timestamps="UTC Unix ns; ts_recv = interval end, ts_event = last trade")
             table = pa.Table.from_pandas(raw, preserve_index=False)
-            table = table.replace_schema_metadata({**table.schema.metadata, RAW_META: json.dumps(info).encode()})
-            tmp = Path(folder) / "raw.parquet"
-            pq.write_table(table, tmp, compression="zstd")
-            tmp.replace(path)
+            _write_decision_raw(path, table, request, sum(part.stat().st_size for part in dbn_files))
 
 
-def _hourly_spreads(path, session, tickers):
-    """Match the exact BBO at 10:00–15:00 New York (10:00–12:00 on an early close)."""
-    first = session.open.tz_convert(NY).ceil("h")
-    hours = pd.date_range(first, session.close.tz_convert(NY), freq="h", inclusive="left")
-    hours = hours[(hours.hour >= 10) & (hours.hour <= 15)]
-    # A 10:00 ts_recv is the right edge of [09:59, 10:00). A missing minute contributes no row.
-    bars = pd.read_parquet(path, columns=["ts_recv", "symbol", "bid_px_00", "ask_px_00"],
-                           filters=[("ts_recv", "in", [hour.value for hour in hours])])
+def _decision_quotes(table, request):
+    """Select each member's final BBO record with the exact decision-hour ts_recv label."""
+    # The paid request uses right-end minute labels. Its exclusive end is one minute after the close.
+    first = (pd.Timestamp(request["start"]) - MINUTE).tz_convert(NY).ceil("h")
+    close = (pd.Timestamp(request["end"]) - MINUTE).tz_convert(NY)
+    hours = pd.date_range(first, close, freq="h", inclusive="left")
+    stamps = [hour.value for hour in hours if 10 <= hour.hour <= 15]
+    # ts_recv = 10:00 labels [09:59, 10:00). No exact quote means no row.
+    keys = table.select(["ts_recv", "symbol"]).to_pandas()
+    keep = keys["ts_recv"].isin(stamps) & keys["symbol"].isin(request["symbols"])
+    keep &= ~keys.duplicated(["ts_recv", "symbol"], keep="last")
+    return table.filter(pa.array(keep.to_numpy()))
+
+
+def _write_decision_raw(path, table, request, compressed_dbn_bytes):
+    """Write original DBN fields for exact decision minutes, with public cache metadata."""
+    selected = _decision_quotes(table, request)
+    info = dict(version=2, selection="exact_decision_minutes", rows=selected.num_rows, request=request,
+                price_scale_usd=1e-9, undef_price=UNDEF_PRICE,
+                timestamps="UTC Unix ns; ts_recv = interval end, ts_event = last trade")
+    if compressed_dbn_bytes is not None:
+        info["compressed_dbn_bytes"] = compressed_dbn_bytes  # size of the original full-session download
+    # Carry forward column types and names; batch IDs belong only in the local SQLite journal.
+    metadata = {k: v for k, v in (selected.schema.metadata or {}).items() if k == b"pandas"}
+    metadata[RAW_META] = json.dumps(info).encode()
+    with TemporaryDirectory(dir=path.parent) as folder:
+        tmp = Path(folder) / path.name
+        pq.write_table(selected.replace_schema_metadata(metadata), tmp, compression="zstd")
+        tmp.replace(path)
+
+
+def _hourly_spreads(path, request):
+    """Build prices and half-spreads from the same decision-minute rows as the daily raw file."""
+    table = pq.read_table(path, columns=["ts_recv", "symbol", "bid_px_00", "ask_px_00"])
+    bars = _decision_quotes(table, request).to_pandas()
     bars = bars.rename(columns={"symbol": "ticker", "bid_px_00": "bid", "ask_px_00": "ask"})
-    bars = bars.loc[bars["ticker"].isin(tickers)].copy()
     bars["ticker"] = bars["ticker"].astype(object)
     bars["ts"] = pd.to_datetime(bars.pop("ts_recv"), unit="ns", utc=True).dt.tz_convert(NY)
     prices = bars[["bid", "ask"]]
@@ -237,7 +258,7 @@ def _hourly_spreads(path, session, tickers):
     bid, ask = bars["bid"], bars["ask"]
     valid = bid.gt(0) & ask.gt(0) & ask.ge(bid)
     bars["half_spread"] = (ask - bid).round(9).where(valid) / 2  # one-way cost, dollars per share
-    return bars[["ts", "ticker", "bid", "ask", "half_spread"]].drop_duplicates(["ts", "ticker"], keep="last")
+    return bars[["ts", "ticker", "bid", "ask", "half_spread"]]
 
 
 if __name__ == "__main__":
