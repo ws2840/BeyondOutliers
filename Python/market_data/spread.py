@@ -23,7 +23,7 @@ OUTPUT_DIR = Path(__file__).resolve().parents[2] / "data" / "spread"
 DATASET = "XNAS.ITCH"
 SCHEMA = "bbo-1m"
 UNDEF_PRICE = 2**63 - 1  # DBN price for a side with no quote
-NY = "America/New_York"
+TZ = "US/Eastern"  # same convention as DatabentoAdapter hourly bars
 MINUTE = timedelta(minutes=1)
 RAW_META = b"beyondoutliers_bbo"
 
@@ -45,7 +45,7 @@ def download_spread_data(start_date="2025-01-01", end_date="2026-01-01", *, outp
             target = root / path.name
             if path != target and target.exists():  # Preserve an older hourly pilot file at the root.
                 target = path
-            current = info.get("version") == 2 and info.get("selection") == "exact_decision_minutes"
+            current = info.get("version") == 3 and info.get("selection") == "exact_decision_minutes"
             if path != target or not current or "job_id" in info:
                 _write_decision_raw(target, pq.read_table(path), request, info.get("compressed_dbn_bytes"))
             path = target
@@ -75,7 +75,8 @@ def build_hour_bar_spread(year=2025, *, month=None, output_dir=OUTPUT_DIR) -> Pa
         journal.execute("BEGIN IMMEDIATE")
         if path.exists():
             previous = pd.read_parquet(path)
-            start, end = period.start_time.tz_localize(NY), (period + 1).start_time.tz_localize(NY)
+            previous["ts"] = previous["ts"].dt.tz_convert(TZ)  # normalize older America/New_York bars before concat
+            start, end = period.start_time.tz_localize(TZ), (period + 1).start_time.tz_localize(TZ)
             keep = (previous["ts"] < start) | (previous["ts"] >= end)
             bars = pd.concat([previous.loc[keep], bars], ignore_index=True)
         bars = bars.sort_values(["ts", "ticker"], ignore_index=True)
@@ -216,29 +217,35 @@ class _SpreadJobs:
 
 
 def _decision_quotes(table, request):
-    """Select each member's final BBO record with the exact decision-hour ts_recv label."""
+    """Select each member's final quote at an exact decision hour, timestamped at minute end."""
+    if "ts_recv" in table.column_names:  # freshly decoded DBN or a pre-v3 cache
+        ts = table["ts_recv"].cast(pa.int64()).cast(pa.timestamp("ns", tz=TZ))
+        old_times = [name for name in ("ts_recv", "ts_event") if name in table.column_names]
+        table = table.drop_columns(old_times).add_column(0, "ts", ts)
+
     # The paid request uses right-end minute labels. Its exclusive end is one minute after the close.
-    first = (pd.Timestamp(request["start"]) - MINUTE).tz_convert(NY).ceil("h")
-    close = (pd.Timestamp(request["end"]) - MINUTE).tz_convert(NY)
+    first = (pd.Timestamp(request["start"]) - MINUTE).tz_convert(TZ).ceil("h")
+    close = (pd.Timestamp(request["end"]) - MINUTE).tz_convert(TZ)
     hours = pd.date_range(first, close, freq="h", inclusive="left")
-    stamps = [hour.value for hour in hours if 10 <= hour.hour <= 15]
+    hours = hours[(hours.hour >= 10) & (hours.hour <= 15)]
     # ts_recv = 10:00 labels [09:59, 10:00). No exact quote means no row.
-    keys = table.select(["ts_recv", "symbol"]).to_pandas()
-    keep = keys["ts_recv"].isin(stamps) & keys["symbol"].isin(request["symbols"])
-    keep &= ~keys.duplicated(["ts_recv", "symbol"], keep="last")
+    keys = table.select(["ts", "symbol"]).to_pandas(ignore_metadata=True)
+    keep = keys["ts"].isin(hours) & keys["symbol"].isin(request["symbols"])
+    keep &= ~keys.duplicated(["ts", "symbol"], keep="last")
     return table.filter(pa.array(keep.to_numpy()))
 
 
 def _write_decision_raw(path, table, request, compressed_dbn_bytes):
     """Write original DBN fields for exact decision minutes, with public cache metadata."""
     selected = _decision_quotes(table, request)
-    info = dict(version=2, selection="exact_decision_minutes", rows=selected.num_rows, request=request,
+    info = dict(version=3, selection="exact_decision_minutes", rows=selected.num_rows, request=request,
                 price_scale_usd=1e-9, undef_price=UNDEF_PRICE,
-                timestamps="UTC Unix ns; ts_recv = interval end, ts_event = last trade")
+                timestamps="ts = BBO minute end in US/Eastern")
     if compressed_dbn_bytes is not None:
         info["compressed_dbn_bytes"] = compressed_dbn_bytes  # size of the original full-session download
-    # Carry forward column types and names; batch IDs belong only in the local SQLite journal.
-    metadata = {k: v for k, v in (selected.schema.metadata or {}).items() if k == b"pandas"}
+    # Store ts first for Parquet readers and mark it as a DatetimeIndex for pandas.
+    frame = selected.to_pandas(ignore_metadata=True).set_index("ts")
+    metadata = pa.Schema.from_pandas(frame, preserve_index=True).metadata
     metadata[RAW_META] = json.dumps(info).encode()
     with TemporaryDirectory(dir=path.parent) as folder:
         tmp = Path(folder) / path.name
@@ -248,11 +255,12 @@ def _write_decision_raw(path, table, request, compressed_dbn_bytes):
 
 def _hourly_spreads(path, request):
     """Build prices and half-spreads from the same decision-minute rows as the daily raw file."""
-    table = pq.read_table(path, columns=["ts_recv", "symbol", "bid_px_00", "ask_px_00"])
-    bars = _decision_quotes(table, request).to_pandas()
+    with pq.ParquetFile(path) as daily:
+        clock = "ts" if "ts" in daily.schema_arrow.names else "ts_recv"
+        table = daily.read(columns=[clock, "symbol", "bid_px_00", "ask_px_00"])
+    bars = _decision_quotes(table, request).to_pandas(ignore_metadata=True)
     bars = bars.rename(columns={"symbol": "ticker", "bid_px_00": "bid", "ask_px_00": "ask"})
     bars["ticker"] = bars["ticker"].astype(object)
-    bars["ts"] = pd.to_datetime(bars.pop("ts_recv"), unit="ns", utc=True).dt.tz_convert(NY)
     prices = bars[["bid", "ask"]]
     bars[["bid", "ask"]] = prices.mask(prices == UNDEF_PRICE).astype(float) / 1e9
     bid, ask = bars["bid"], bars["ask"]
