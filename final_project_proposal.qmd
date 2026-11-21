@@ -19,13 +19,14 @@ We will build and backtest an end-to-end US equity portfolio, covering market da
 - Market Data: Yahoo finance/WRDS Security Master data and Databento intraday data
 - Risk Model Construction
 - Alpha Model Construction: 2-6 alpha models with a 1-day forecast horizon, evaluated with forecast analytics (IC, t-stats, tail statistics)
-- Spread Cost Model: estimate the bid-ask spread cost of each trade
+- Spread Cost Model: use half the Nasdaq bid-ask spread to estimate the cost of buying or selling one share
 - Portfolio Construction: trading 10:00 am - 3:00 pm EST, aiming to trade every 1h
 - Accountant: PNL/Sharpe and position
 
 ## Data Requirements
 
 - DataBento: 1h bar data from XNAS.ITCH, starting from 2018-05-01 (earliest)
+- DataBento: daily files of one-minute BBOs and one hourly spread table
 - Yahoo Finance: security master data after 2026-06-30
 - WRDS CRSP: security master data before 2026-06-30
 - WRDS Global factor model: 153 factors
