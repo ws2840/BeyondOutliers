@@ -25,7 +25,7 @@ USE4_STYLE = {                                                   # JKP column: U
     "beta": {"beta_252d": 1.0},                                  # BETA
     "momentum": {"ret_12_1": 1.0},                               # RSTR
     "size": {"log_me_company": 1.0},                             # LNCAP
-    "earnings_yield": {"ocf_me": 0.15, "ni_me": 0.10},           # CETOP, ETOP
+    "earnings_yield": {"ce_me": 0.15, "ni_me": 0.10},            # CETOP, ETOP
     "residual_volatility": {"rvol_252d": 0.75, "ivol_capm_252d": 0.10},  # DASTD, HSIGMA
     "growth": {"sale_gr3": 0.10},                                # SGRO (5y in USE4, 3y in JKP)
     "dividend_yield": {"div12m_me": 1.0},                        # YILD
@@ -73,6 +73,9 @@ class BetaLoadingGenerator:
         cap = d["market_equity"].astype(float)
         d["log_me_company"] = np.log(d["me_company"].astype(float))
         d["log_turnover_126d"] = np.log(d["turnover_126d"].astype(float))
+        # CETOP cash earnings, not ocf_me (bank OCF swings with loans):
+        # ce_me = (NI + D&A)/ME = ni_me + (ebitda_me - ebit_me)
+        d["ce_me"] = d["ni_me"].astype(float) + d["ebitda_me"].astype(float) - d["ebit_me"].astype(float)
 
         out = pd.DataFrame(index=d.index)
         for factor, weights in USE4_STYLE.items():
