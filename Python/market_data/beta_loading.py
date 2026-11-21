@@ -37,8 +37,7 @@ USE4_STYLE = {                                                   # JKP column: U
 
 GICS_SECTOR = {"10": "energy", "15": "materials", "20": "industrials", "25": "consumer_discretionary",
                "30": "consumer_staples", "35": "health_care", "40": "financials",
-               "45": "information_technology", "50": "communication_services", "55": "utilities",
-               "60": "real_estate"}
+               "45": "information_technology", "50": "communication_services", "55": "utilities"}
 
 
 class BetaLoadingGenerator:
@@ -89,8 +88,11 @@ class BetaLoadingGenerator:
         out["non_linear_beta"] = _standardize(_orthogonalize(out["beta"] ** 3, out["beta"], cap), cap)
         out = out.fillna(0.0)
 
+        # real estate (60) -> financials (40): JKP drops REITs, leaving 1-2 real estate stocks (thin industry,
+        # USE4 Methodology Sec. 2.4); USE4 itself keeps Real Estate (GICS 4040) inside Financials
+        sector = d["gsector"].replace("60", "40")
         for code, name in GICS_SECTOR.items():
-            out[f"gics_{name}"] = (d["gsector"] == code).astype(float)
+            out[f"gics_{name}"] = (sector == code).astype(float)
         # country: 1 for every stock (USE4 eq. 3.1). It equals the sum of the sector dummies, so the factor
         # return regression needs the constraint sum_i (sector cap weight_i * sector return_i) = 0 (eq. 3.3)
         out["country"] = 1.0
