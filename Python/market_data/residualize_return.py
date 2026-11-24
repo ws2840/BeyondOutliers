@@ -102,8 +102,10 @@ class ReturnResidualizer:
 
 def main():
     # 1 month only for now (June 2018); full history is 2018-06-01 to 2026-01-31 (first / last loadings 2018-05-31 / 2025-12-31)
-    residualizer = ReturnResidualizer("2018-05-01", "2026-01-01", lagging=True)
-    residualizer.residualize()
+    # residualizer = ReturnResidualizer("2018-05-01", "2026-01-01", lagging=True)
+    # residualizer.residualize()
+    leading_residualizer = ReturnResidualizer("2018-05-01", "2026-01-01", lagging=False)
+    leading_residualizer.residualize()
 
 
 if __name__ == "__main__":
