@@ -12,7 +12,8 @@ Notes", Sec. 3):
 - weighted least squares, regression weight sqrt(cap)
 - constraint sum_i w_i f_i = 0, w_i = cap weight of sector i (eq. 3.3), so f_c is ~ the cap-weighted market return
 Each trading day is run on its own, using the loadings of the last month-end before that day (e.g. 2018-06-15 ->
-loadings of 2018-05-31). Outputs are stored one file per trading date.
+loadings of 2018-05-31). Factor returns are stored one file per trading date; residual returns of all days are stored
+in one file, data/<res_lag_returns|res_lead_returns>/1h_bar.parquet.
 """
 
 class ReturnResidualizer:
@@ -34,28 +35,28 @@ class ReturnResidualizer:
             cap = pd.read_parquet(DATA_DIR / "beta" / f"{prev_eom}.parquet").set_index("ticker")["market_equity"].astype(float)
             return loading, cap
 
+        res_returns = []
         for day, returns in self._returns.groupby(self._returns.index.date):
             loading, cap = _load_loading(day)
             factor_return = self._generate_factor_return(day, returns, loading, cap)
-            self._residualize_return(day, returns, loading, factor_return)
+            res_returns.append(self._residualize_return(returns, loading, factor_return))
             print('done', day)
-
-    def _residualize_return(self, day, returns, loading, factor_return):
-        """Specific return u_n = r_n - sum_k X_nk f_k (USE4 eq. 3.1)
-        Stocks without loadings (REITs etc., not in JKP) are dropped."""
-        returns = returns[returns["ticker"].isin(loading.index)]
-
-        X = loading.loc[returns["ticker"], factor_return.columns].to_numpy()
-        f = factor_return.reindex(returns.index).fillna(0.0).to_numpy()   # NaN: sector with no stock in that bar
-        out = returns.assign(ret=returns["ret"] - (X * f).sum(axis=1))
 
         if self._lagging:
             out_dir = DATA_DIR / "res_lag_returns"
         else:
             out_dir = DATA_DIR / "res_lead_returns"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out.to_parquet(out_dir / f"{day}.parquet")
-        return out
+        pd.concat(res_returns).to_parquet(out_dir / "1h_bar.parquet", compression="zstd")
+
+    def _residualize_return(self, returns, loading, factor_return):
+        """Specific return u_n = r_n - sum_k X_nk f_k (USE4 eq. 3.1)
+        Stocks without loadings (REITs etc., not in JKP) are dropped."""
+        returns = returns[returns["ticker"].isin(loading.index)]
+
+        X = loading.loc[returns["ticker"], factor_return.columns].to_numpy()
+        f = factor_return.reindex(returns.index).fillna(0.0).to_numpy()   # NaN: sector with no stock in that bar
+        return returns.assign(ret=returns["ret"] - (X * f).sum(axis=1))
 
     def _generate_factor_return(self, day, returns, loading, cap):
         """Factor returns of the bars of `day`, saved to data/factor_returns/<day>.parquet
@@ -96,8 +97,8 @@ class ReturnResidualizer:
 
 def main():
     # 1 month only for now (June 2018); full history is 2018-06-01 to 2026-01-31 (first / last loadings 2018-05-31 / 2025-12-31)
-    residualizer = ReturnResidualizer("2018-05-01", "2026-01-01", lagging=True)
-    residualizer.residualize()
+    # residualizer = ReturnResidualizer("2018-05-01", "2026-01-01", lagging=True)
+    # residualizer.residualize()
     leading_residualizer = ReturnResidualizer("2018-05-01", "2026-01-01", lagging=False)
     leading_residualizer.residualize()
 
