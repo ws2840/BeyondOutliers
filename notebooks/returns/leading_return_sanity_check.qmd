@@ -24,10 +24,10 @@ import pandas as pd
 import sys
 from pathlib import Path
 
-ROOT = Path.cwd().parent
+ROOT = Path.cwd().parent.parent
 
 leading_return = pd.read_parquet(ROOT /'data'/'leading_returns/1h_bar.parquet')
-res_leading_return = pd.read_parquet(ROOT /'data'/'leading_returns/1h_bar.parquet')
+res_leading_return = pd.read_parquet(ROOT /'data'/'res_lead_returns/1h_bar.parquet')
 
 
 aapl_leading_1d = leading_return.loc['2025-01-02'][lambda df: df.ticker == 'AAPL']
