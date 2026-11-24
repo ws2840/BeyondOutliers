@@ -12,7 +12,7 @@ Notes", Sec. 3):
 - weighted least squares, regression weight sqrt(cap)
 - constraint sum_i w_i f_i = 0, w_i = cap weight of sector i (eq. 3.3), so f_c is ~ the cap-weighted market return
 Bars of month m use the loadings of the previous month-end: bars after the previous month-end's 16:00 close up to
-m's month-end 16:00 close. Outputs are named by m's month-end.
+m's month-end 16:00 close. Outputs are stored one file per trading date.
 """
 
 class ReturnResidualizer:
@@ -58,12 +58,13 @@ class ReturnResidualizer:
         else:
             out_dir = DATA_DIR / "res_lead_returns"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out.to_parquet(out_dir / f"{eom}.parquet")
+        for day, day_out in out.groupby(out.index.date):
+            day_out.to_parquet(out_dir / f"{day}.parquet")
         return out
 
     def _generate_factor_return(self, eom):
         """Factor returns of the bars of month `eom`, using the previous month-end's loadings (e.g. 2018-06-30 ->
-        loadings of 2018-05-31 -> June 2018 bars), saved to data/factor_returns/<eom>.parquet
+        loadings of 2018-05-31 -> June 2018 bars), saved to data/factor_returns/<date>.parquet
         (index = bar ts, one column per factor)."""
         def _regress(ret, loading, cap, sectors):
             """Constrained WLS of one bar's returns on the loadings. The constraint is substituted in: the largest
@@ -96,14 +97,15 @@ class ReturnResidualizer:
         else:
             out_dir = DATA_DIR / "lead_factor_returns"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out.to_parquet(out_dir / f"{eom}.parquet")
+        for day, day_out in out.groupby(out.index.date):
+            day_out.to_parquet(out_dir / f"{day}.parquet")
         return out
 
 
 def main():
     # 1 month only for now (June 2018); full history is 2018-06-01 to 2026-01-31 (first / last loadings 2018-05-31 / 2025-12-31)
-    # residualizer = ReturnResidualizer("2018-05-01", "2026-01-01", lagging=True)
-    # residualizer.residualize()
+    residualizer = ReturnResidualizer("2018-05-01", "2026-01-01", lagging=True)
+    residualizer.residualize()
     leading_residualizer = ReturnResidualizer("2018-05-01", "2026-01-01", lagging=False)
     leading_residualizer.residualize()
 
