@@ -34,3 +34,6 @@ Dates use US/Eastern and left-closed, right-open intervals. Warm-up observations
 - **Flexible validation.** Each member decides how to split training and validation data: a chronological holdout, walk-forward validation, or another time-aware approach. Model selection and tuning stay within the training period.
 - **Common test evaluation.** Finalize individual models, then evaluate all predictions on the same 2025 test set using agreed metrics. Use a common target, forecast horizon, and evaluation universe; submit predictions indexed by timestamp and ticker on a consistent scale.
 - **Combined signal.** After evaluating individual models, combine their predictions into an ensemble signal for portfolio optimization. The combination rule is to be agreed. Set weights using training-period validation predictions or a preset rule; if 2025 results are used to select models or tune weights, the ensemble needs a new holdout for independent evaluation.
+
+# 4. Target
+[TBD]
