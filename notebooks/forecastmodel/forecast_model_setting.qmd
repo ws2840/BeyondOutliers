@@ -34,3 +34,13 @@ Dates use US/Eastern and left-closed, right-open intervals. Warm-up observations
 - **Flexible validation.** Each member decides how to split training and validation data: a chronological holdout, walk-forward validation, or another time-aware approach. Model selection and tuning stay within the training period.
 - **Common test evaluation.** Finalize individual models, then evaluate all predictions on the same 2025 test set using agreed metrics. Use a common target, forecast horizon, and evaluation universe; submit predictions indexed by timestamp and ticker on a consistent scale.
 - **Combined signal.** After evaluating individual models, combine their predictions into an ensemble signal for portfolio optimization. The combination rule is to be agreed. Set weights using training-period validation predictions or a preset rule; if 2025 results are used to select models or tune weights, the ensemble needs a new holdout for independent evaluation.
+
+# 4. Target
+
+The target is the 1-trading-day forward residual return. Decisions are made at the hourly bar ends $t$ = 10:00, 11:00, ..., 15:00 (no trading at 16:00), and
+$$
+y_{i,t} = \sum_{k=1}^{7} u_{i,t+k},
+$$
+where $u_{i,s}$ is the residualized leading return of stock $i$ at bar label $s$ (open of the bar ending at $s$ to the open of the next bar) and $t+k$ is the stock's $k$-th next bar. The window runs from the price at $t$ to the price at the same time on the next trading day, e.g. the 10:00 target sums the 11:00, ..., 16:00 and next-day 10:00 bars. Windows without exactly one overnight (16:00) bar are dropped, and so are windows touching an NYSE half day (decisions on a half day and on the trading day before it). Built by `Python/forecasts/build_target.py` and saved to `data/target/1h_bar.parquet`.
+
+![Target: one stock's 10:00 targets (top) and the cross-sectional std of the target by decision hour (middle, bottom).](../figures/target.png){width=100%}
