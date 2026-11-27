@@ -1,38 +1,25 @@
 """
-Forecast generation API. An alpha model subclasses ForecastModel and implements `_forecast(for_date)`;
-`gen()` calls it for each trading day in [start, end] and saves all days to data/forecasts/<model_name>/forecast.parquet.
+Oracle forecast: the realized target (data/target/1h_bar.parquet), i.e. perfect foresight of the 1-day forward residual
+return. It uses future data on purpose, so it is not a real model: it is an upper bound for testing the optimizer.
 """
 
-from abc import ABC, abstractmethod
+import sys
 from pathlib import Path
 
 import pandas as pd
-import pandas_market_calendars as mcal
 
-DATA_DIR = Path(__file__).resolve().parents[2] / "data"
-FORECAST_OUT_DIR = Path(__file__).resolve().parents[2] / "data" / "forecasts"
+sys.path.append(str(Path(__file__).resolve().parents[2]))  # Python/, so `forecasts` imports when run as a script
+from forecasts.forecast_gen_api import DATA_DIR, ForecastModel
 
 
-class OracleForecastModel(ABC):
-    def __init__(self, model_name, start, end):
-        """NYSE trading days in [start, end] to generate for."""
-        self._model_name = model_name.lower()  # output file: data/forecasts/<model_name>/forecast.parquet
-        self._trading_days = mcal.get_calendar("XNYS").valid_days(start, end).date
+class OracleForecastModel(ForecastModel):
+    def __init__(self, start, end):
+        super().__init__("oracle", start, end)
+        self._target = pd.read_parquet(DATA_DIR / "target" / "1h_bar.parquet")
 
-    @abstractmethod
     def _forecast(self, for_date):
-        """Forecasts of `for_date`'s hourly bars, using only data before `for_date`'s open.
-        Returns a DataFrame indexed by time with columns symbol, forecast."""
-
-    def gen(self):
-        forecasts = []
-        for for_date in self._trading_days:
-            forecasts.append(self._forecast(for_date)[["symbol", "forecast"]])
-            print('done', for_date)
-        forecast_out_dir = FORECAST_OUT_DIR / self._model_name
-        forecast_out_dir.mkdir(parents=True, exist_ok=True)
-        pd.concat(forecasts).to_parquet(forecast_out_dir / "forecast.parquet")
+        return self._target.loc[str(for_date)].rename(columns={"ticker": "symbol", "ret": "forecast"})
 
 
-if __name__ == '__main__':
-    ...
+if __name__ == "__main__":
+    OracleForecastModel("2019-05-01", "2025-12-30").gen()
