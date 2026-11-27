@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+import cvxpy as cp
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 FORECAST_PATH = DATA_DIR / "forecasts" / "oracle" / "forecast.parquet"
