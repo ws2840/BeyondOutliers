@@ -1,0 +1,24 @@
+---
+title: "Portfolio Construction"
+subtitle: "BeyondOutliers | Working specification"
+format:
+  pdf:
+    documentclass: article
+    fontsize: 11pt
+    papersize: letter
+    geometry: margin=0.95in
+    toc: false
+    number-sections: false
+    pdf-engine: pdflatex
+---
+
+# 1. Portfolio setting
+
+- Initial Capital $I_0$: 100M
+
+# 2. Utility Function
+
+$$
+U(p) = f^T p - \frac{\lambda}{2} p^T(L^T \Sigma_F L + D_{specific})p - \frac{1}{2} s^T|p - p_0|
+$$
+
