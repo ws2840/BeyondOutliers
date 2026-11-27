@@ -21,7 +21,7 @@ MIN_HISTORY = 252                  # days of factor returns needed before the fi
 SHRINK_Q = 0.1                     # Bayesian shrinkage parameter q (Table 5.1)
 E0 = 1.05                          # structural model bias correction, "slightly greater than 1" (eq. 5.4); CNE5 value
 
-class RiskModel:
+class RiskDataGen:
 
     def __init__(self, start, end):
         """Model inputs, and the full (not half-day) US trading days in [start, end] with at least
@@ -164,8 +164,8 @@ class RiskModel:
         return out
 
 def main():
-    risk_model = RiskModel('2018-05-01', '2025-12-31')
-    risk_model.run()
+    risk_data_gen = RiskDataGen('2018-05-01', '2025-12-31')
+    risk_data_gen.run()
 
 
 if __name__ == "__main__":
