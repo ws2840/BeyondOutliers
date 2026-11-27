@@ -18,15 +18,15 @@ Each team member develops a prediction model for future residual returns using i
 
 # 2. Chronological data split
 
-Data from **2018-05-01 to 2019-05-01** are used to warm up features and the risk model. Forecast-model training starts on **2019-05-01**, and **2025** is reserved for testing.
+Data from **2018-05-01 to 2019-05-01** are used to warm up features and the risk model. Forecast-model training starts on **2019-05-02**, and **2025** is reserved for testing.
 
 | Sample | Decision-time interval |
 |:-------|:-----------------------|
-| Warm-up | 2018-05-01 $\le t <$ 2019-05-01 |
-| Train | 2019-05-01 $\le t <$ 2025-01-01 |
-| Test | 2025-01-01 $\le t <$ 2026-01-01 |
+| Warm-up | 2018-05-01 $\le t \le$ 2019-05-01 |
+| Train | 2019-05-02 $\le t <$ 2025-01-01 |
+| Test | 2025-01-01 $\le t <$ 2025-12-31 |
 
-Dates use US/Eastern and left-closed, right-open intervals. Warm-up observations are not forecast-model training samples; testing includes available observations through **2025-12-31**.
+Dates use US/Eastern and left-closed, right-open intervals. Warm-up observations are not forecast-model training samples; testing includes available observations through **2025-12-30**.
 
 # 3. Training, evaluation, and signal combination
 

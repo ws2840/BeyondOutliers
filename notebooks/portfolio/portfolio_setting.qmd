@@ -19,6 +19,6 @@ format:
 # 2. Utility Function
 
 $$
-U(p) = f^T p - \frac{\lambda}{2} p^T(L^T \Sigma_F L + D_{specific})p - \frac{1}{2} s^T|p - p_0|
+U(p) = f^T p - \frac{1}{2a} p^T(L^T \Sigma_F L + D_{specific})p - \frac{1}{2} s^T|p - p_0|
 $$
 
